@@ -38,7 +38,22 @@
 | **Penalty miss** | -2 | -2 | -2 | -2 |
 | **Bonus (top 3 performers)** | 3/2/1 | 3/2/1 | 3/2/1 | 3/2/1 |
 
+
+Starting this season, 2025/2026, FPl has also introduced defensive contributions for a single match. These are the defensive actions that will earn points:
+- Blocks
+- Tackles
+- Interceptions
+- Clearances
+- Recoveries (midfeilders and forwards only)
+
+10 defensive contribtuons = 2 points for defenders,
+
+12 defensive contributions = 2 point for midfielders and forwards.
+
+Defensive contributions points are capped at 2 points per match for all players.
+
 ---
+
 
 ## 🎯 Your FPL Tool Requirements
 
@@ -526,5 +541,3 @@ Alternative: Save transfer, roll over to next week
 - Basic API integration
 - First 3 tools working
 - Optimization algorithm template
-
-This will be an **amazing** hackathon project! 🏆
