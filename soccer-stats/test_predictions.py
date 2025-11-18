@@ -5,14 +5,14 @@ import joblib
 
 def load_models():
     """Load trained models"""
-    result_model = joblib.load("models/result_classifier.pkl")
-    home_goals_model = joblib.load("models/home_goals_predictor.pkl")
-    away_goals_model = joblib.load("models/away_goals_predictor.pkl")
+    result_model = joblib.load("../models/result_classifier.pkl")
+    home_goals_model = joblib.load("../models/home_goals_predictor.pkl")
+    away_goals_model = joblib.load("../models/away_goals_predictor.pkl")
 
-    with open("models/result_features.txt", "r") as f:
+    with open("../models/result_features.txt", "r") as f:
         result_features = [line.strip() for line in f.readlines()]
 
-    with open("models/goals_features.txt", "r") as f:
+    with open("../models/goals_features.txt", "r") as f:
         goals_features = [line.strip() for line in f.readlines()]
 
     return result_model, home_goals_model, away_goals_model, result_features, goals_features

@@ -137,15 +137,15 @@ def main():
     # Save models
     print("\n💾 Saving models...")
 
-    joblib.dump(result_model, "models/result_classifier.pkl")
-    joblib.dump(home_goals_model, "models/home_goals_predictor.pkl")
-    joblib.dump(away_goals_model, "models/away_goals_predictor.pkl")
+    joblib.dump(result_model, "../models/result_classifier.pkl")
+    joblib.dump(home_goals_model, "../models/home_goals_predictor.pkl")
+    joblib.dump(away_goals_model, "../models/away_goals_predictor.pkl")
 
     # Save feature lists
-    with open("models/result_features.txt", "w") as f:
+    with open("../models/result_features.txt", "w") as f:
         f.write("\n".join(result_features))
 
-    with open("models/goals_features.txt", "w") as f:
+    with open("../models/goals_features.txt", "w") as f:
         f.write("\n".join(goals_features))
 
     print("   ✅ Saved result_classifier.pkl")
@@ -162,6 +162,6 @@ if __name__ == "__main__":
     # Create models directory if it doesn't exist
     import os
 
-    os.makedirs("models", exist_ok=True)
+    os.makedirs("../models", exist_ok=True)
 
     main()

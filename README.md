@@ -1,269 +1,372 @@
-# Football-MCP
+# FootballMCP - Complete Football Intelligence Suite
 
-Soccer Stats MCP Server
-Version: 1.0.0
-Data Source: Football-Data.org API
-Coverage: Premier League, UEFA Champions League
-Current Season: 2024/2025
+> **Two powerful MCP servers** for soccer analytics and Fantasy Premier League optimization
 
-🎯 Server Capabilities
-This MCP server provides 6 tools for soccer/football data and predictions:
+## 🎯 What This Project Does
 
-Real-time Match Data - Live scores and today's matches
-Future Fixtures - Upcoming matches (1-10 days ahead)
-League Standings - Current Premier League table
-Team Analysis - Individual team match history and schedule
-Player Statistics - Top goal scorers
-ML Predictions - Machine learning match outcome predictions
+**FootballMCP** provides AI-powered football intelligence through two specialized MCP servers:
 
+1. **⚽ Soccer Stats Server** - Match predictions, live scores, league standings
+2. **🏆 FPL Optimizer Server** - Fantasy Premier League team optimization and analysis
 
-📊 Data Coverage
-Competitions
+Both servers can be used together or independently with any MCP-compatible LLM client (Claude Desktop, Perplexity, etc.).
 
-✅ Premier League (English top division)
-✅ UEFA Champions League (European competition)
+---
 
-Time Periods
+## 📊 Server 1: Soccer Stats MCP
 
-Historical: Matches from 2021/2022 season onwards
-Current: Live season 2024/2025
-Future: Scheduled matches up to 10 days ahead
+**Location:** `soccer-stats/`
 
-Update Frequency
+### What It Does
+- Live match scores and schedules
+- League standings (Premier League & Champions League)
+- Team performance analysis
+- Machine learning match predictions
+- Head-to-head comparisons
 
-Live scores: Real-time during matches
-Standings: Updated after each matchday
-Fixtures: Updated as matches are scheduled
-ML models: Trained on historical data (retrain monthly recommended)
+### Key Tools
+- `get_live_matches` - Today's matches with live scores
+- `get_standings` - Current league table
+- `predict_match` - ML-powered match predictions
+- `get_team_matches` - Team-specific fixtures
+- `get_top_scorers` - Leading goal scorers
 
+### Data Source
+- **Football-Data.org API** (requires free API key)
+- Coverage: Premier League, Champions League
+- 10 requests per minute limit
 
-🛠️ Tool Capabilities & Limitations
-✅ What This Server CAN Do
+[📖 Full Soccer Stats Documentation →](soccer-stats/README.md)
 
-Get Today's Matches
+---
 
-Live scores with current minute
-Finished matches with final scores
-Upcoming kickoffs for today
+## 🏆 Server 2: FPL Optimizer MCP
 
+**Location:** `fpl-optimizer/`
 
-Get Upcoming Fixtures
+### What It Does
+- Player analysis for all 600+ Premier League players
+- Fixture difficulty ratings
+- Team value optimization
+- Transfer recommendations
+- Captain selection advice
 
-Scheduled matches for next 1-10 days
-Match dates and times
-Home/away teams
+### Current Tools (Phase 1 Complete ✅)
+- `get_all_players` - Filter & sort all PL players
+- `get_player_details` - Deep player statistics
+- `get_fixtures` - Upcoming matches with difficulty
+- `get_my_team` - View your FPL squad
+- `get_top_performers` - Top players by any metric
 
+### Coming Soon (Phase 2)
+- `optimize_squad` - Build optimal 15-player team
+- `suggest_transfers` - Smart transfer suggestions
+- `suggest_captain` - Data-driven captain picks
+- ML-powered points prediction
 
-Get League Table
+### Data Source
+- **Official FPL API** (no API key needed!)
+- Real-time data, unlimited requests
+- Updated instantly during matches
 
-All 20 Premier League teams
-Position, points, games played
-Goal difference
+[📖 Full FPL Optimizer Documentation →](fpl-optimizer/README.md)
 
+---
 
-Analyze Specific Teams
+## 🚀 Quick Start
 
-Recent match results (with scores)
-Upcoming fixtures
-Recent form (W/D/L record)
+### 1. Clone & Install
 
+```bash
+git clone https://github.com/yourusername/FootballMCP.git
+cd FootballMCP
 
-Get Top Scorers
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-Player names and teams
-Total goals scored
-Current season only
+# Install dependencies
+pip install -r soccer-stats/requirements.txt
+pip install -r fpl-optimizer/requirements.txt
+```
 
+### 2. Configure API Keys
+
+Create `.env` file in project root:
+
+```bash
+# Soccer Stats API (get free key from football-data.org)
+FOOTBALL_DATA_API_KEY=your_key_here
+```
+
+**Note:** FPL Optimizer doesn't need an API key!
+
+### 3. Test Both Servers
+
+```bash
+# Test Soccer Stats
+cd soccer-stats
+python test_api.py
+
+# Test FPL Optimizer
+cd ../fpl-optimizer
+python test_fpl_api.py
+python test_tools.py
+```
+
+### 4. Configure Your MCP Client
+
+Add to your MCP client config (e.g., Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "soccer-stats": {
+      "command": "python",
+      "args": ["/absolute/path/to/FootballMCP/soccer-stats/Server.py"],
+      "env": {
+        "FOOTBALL_DATA_API_KEY": "your_key_here"
+      }
+    },
+    "fpl-optimizer": {
+      "command": "python",
+      "args": ["/absolute/path/to/FootballMCP/fpl-optimizer/Server.py"]
+    }
+  }
+}
+```
+
+**Restart your MCP client after configuration!**
+
+---
+
+## 💡 Example Queries
+
+### Soccer Stats Queries
+
+```
+"What Premier League matches are on today?"
+"Show me the current Premier League standings"
+"Predict the outcome of Liverpool vs Manchester City"
+"How has Arsenal been performing recently?"
+"Who are the top scorers in the Premier League?"
+```
+
+### FPL Optimizer Queries
+
+```
+"Show me all midfielders under £8m sorted by form"
+"Tell me about Mohamed Salah's stats and upcoming fixtures"
+"Which teams have the easiest fixtures in the next 5 gameweeks?"
+"Who are the top 10 scorers this season?"
+"Show me the best value defenders"
+```
+
+### Combined Queries (Using Both Servers!)
+
+```
+"Compare Haaland's FPL stats with City's upcoming fixtures and predict their next match"
+"Show me Arsenal's fixture difficulty and their top FPL assets"
+"Who are the in-form players from teams with easy fixtures?"
+```
+
+---
+
+## 📁 Project Structure
+
+```
+FootballMCP/
+├── README.md                    # This file
+├── .env                         # API keys (create this)
+├── .venv/                       # Python virtual environment
+├── models/                      # Shared ML models
+│
+├── soccer-stats/                # Server 1: Soccer Stats
+│   ├── Server.py                # Main MCP server
+│   ├── collect_training_data.py # ML data collection
+│   ├── train_model.py           # Train ML models
+│   ├── test_api.py              # API connection test
+│   ├── test_predictions.py      # Test ML predictions
+│   ├── requirements.txt
+│   ├── README.md
+│   └── Tool_usage_guide.md
+│
+└── fpl-optimizer/               # Server 2: FPL Optimizer
+    ├── Server.py                # Main MCP server
+    ├── test_fpl_api.py          # API connection test
+    ├── test_tools.py            # Test all tools
+    ├── requirements.txt
+    ├── README.md
+    └── SETUP.md
+```
+
+---
+
+## 🔧 Development Status
+
+### ✅ Completed
+
+**Soccer Stats Server:**
+- ✅ Real-time match data
+- ✅ League standings
+- ✅ Team analysis
+- ✅ ML predictions (basic)
+- ✅ Top scorers
+
+**FPL Optimizer Server (Phase 1):**
+- ✅ Player filtering & sorting
+- ✅ Detailed player stats
+- ✅ Fixture analysis
+- ✅ Team viewing
+- ✅ Performance metrics
+
+### 🚧 In Progress / Planned
+
+**Soccer Stats Improvements:**
+- 🔄 Better ML training data
+- 🔄 Improved prediction accuracy
+- 📅 More competitions (La Liga, Serie A)
+- 📅 Advanced statistics (xG, xA)
+
+**FPL Optimizer (Phase 2):**
+- 📅 Squad optimization (Linear Programming)
+- 📅 Transfer recommendations
+- 📅 Captain suggestions
+- 📅 ML points prediction
+- 📅 Chip strategy advice
+
+---
+
+## 🎓 Technical Details
+
+### Soccer Stats Server
+
+**Technologies:**
+- MCP Protocol
+- Football-Data.org API
+- scikit-learn (Random Forest ML)
+- pandas, numpy
+
+**ML Model:**
+- Random Forest Classifier (match results)
+- Random Forest Regressor (goal predictions)
+- Features: Recent form, goals, wins/draws/losses
+- Training data: Last 3 seasons
+
+### FPL Optimizer Server
+
+**Technologies:**
+- MCP Protocol
+- Official FPL API (free!)
+- pandas, numpy
+- PuLP (for Phase 2 optimization)
+
+**Phase 2 Planned:**
+- Linear Programming for squad optimization
+- ML for points prediction
+- Expected points calculations
+
+---
+
+## 🐛 Troubleshooting
+
+### Soccer Stats Issues
+
+**"API Key Invalid" Error:**
+1. Check your API key at football-data.org
+2. Verify `.env` file format
+3. Make sure key is active (free tier)
+
+**"Rate Limit" Error:**
+- Free tier: 10 requests per minute
+- Wait 60 seconds between batches
+- Consider upgrading to paid tier
+
+### FPL Optimizer Issues
+
+**"Could not find team" Error:**
+- Verify your FPL team ID
+- URL: `fantasy.premierleague.com/entry/YOUR_ID/`
+- Team must be active for current season
+
+**"Player not found" Error:**
+- Use shorter names (e.g., "Salah" not "Mohamed Salah")
+- Names use partial matching
+- Check spelling
+
+### General Issues
+
+**MCP Server Not Connecting:**
+1. Test servers individually: `python Server.py`
+2. Check Python version (3.8+)
+3. Verify absolute paths in MCP config
+4. Restart your MCP client after config changes
+
+**Import Errors:**
+```bash
+pip install -r soccer-stats/requirements.txt
+pip install -r fpl-optimizer/requirements.txt
+```
+
+---
+
+## 📊 Data Sources
+
+### Soccer Stats
+- **Football-Data.org API**
+  - Free tier: 10 req/min
+  - Coverage: 10+ leagues
+  - Historical data: 2021+
+  - [Get API Key →](https://www.football-data.org/client/register)
+
+### FPL Optimizer
+- **Official FPL API**
+  - No API key needed
+  - No rate limits
+  - Real-time data
+  - [API Docs (Unofficial) →](https://fantasy.premierleague.com/api/bootstrap-static/)
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! Areas of interest:
+
+1. **Soccer Stats Improvements:**
+   - Better ML models
+   - More data sources
+   - Additional leagues
+
+2. **FPL Optimizer Phase 2:**
+   - Optimization algorithms
+   - ML predictions
+   - Advanced analytics
+
+3. **General:**
+   - Documentation
+   - Testing
+   - Bug fixes
+
+---
+
+## 📝 License
+
+MIT License - See LICENSE file for details
+
+---
+
+## 🙏 Acknowledgments
+
+- [Football-Data.org](https://www.football-data.org/) for soccer data
+- [Fantasy Premier League](https://fantasy.premierleague.com/) for FPL API
+- [Model Context Protocol](https://modelcontextprotocol.io/) by Anthropic
+
+---
+
+## 📞 Support
+
+- Issues: [GitHub Issues](https://github.com/yourusername/FootballMCP/issues)
+- Discussions: [GitHub Discussions](https://github.com/yourusername/FootballMCP/discussions)
+
+---
 
-Predict Match Outcomes
-
-Win/draw/loss probabilities
-Expected goals for each team
-Team form analysis
-Confidence ratings
-
-
-
-❌ What This Server CANNOT Do
-
-Player Details
-
-❌ Injuries or suspensions
-❌ Player transfers
-❌ Individual player stats (except goals)
-❌ Lineups or formations
-
-
-Advanced Statistics
-
-❌ Possession percentages
-❌ Pass completion rates
-❌ xG (expected goals) from matches
-❌ Shot statistics
-
-
-Other Leagues
-
-❌ La Liga, Serie A, Bundesliga
-❌ Lower divisions
-❌ International tournaments (except Champions League)
-
-
-Historical Deep Dives
-
-❌ Matches before 2021
-❌ All-time records
-❌ Historical head-to-head (simplified only)
-
-
-Real-Time Everything
-
-❌ Live commentary
-❌ Video highlights
-❌ Live player positions/events
-
-
-Betting Information
-
-❌ Odds or betting lines
-❌ Gambling recommendations
-
-
-
-
-🎯 Best Use Cases
-✅ Great For:
-
-"What matches are on today?"
-"Show me the Premier League table"
-"How has Arsenal been performing?"
-"Predict Liverpool vs Manchester City"
-"Who are the top scorers?"
-"What's Chelsea's next match?"
-
-⚠️ Not Ideal For:
-
-"Show me La Liga table" (not supported)
-"Is Salah injured?" (no injury data)
-"What are the betting odds?" (no betting info)
-"Show me the 1998 Arsenal squad" (too historical)
-
-
-🔄 Data Freshness
-
-Live Match Scores: Updated in real-time during matches
-Fixtures: Updated as officially scheduled
-Standings: Updated after each matchday completes
-Top Scorers: Updated after each matchday
-Team Stats: Based on last 5 completed matches
-ML Predictions: Based on training data (retrain for best accuracy)
-
-
-🚀 Performance Notes
-Response Times
-
-Fast (<1s): Standings, top scorers
-Medium (1-2s): Live matches, fixtures, team matches
-Slower (2-5s): ML predictions (requires team stat calculation)
-
-Rate Limits
-
-Free Tier: 10 requests per minute
-Daily Limit: None (only per-minute limit)
-
-Tip: Batch requests when possible (e.g., use get_fixtures for all matches instead of checking teams individually)
-
-💡 Usage Tips for LLMs
-1. Choose the Right Tool
-
-Single team query → get_team_matches
-Two teams + prediction → predict_match
-Time-based → get_live_matches (today) or get_fixtures (future)
-
-2. Handle Ambiguity
-
-"matches" → Ask: "Today's matches or upcoming?"
-Team names → Use partial matching ("City" works for "Manchester City")
-Predictions → Always specify home/away team clearly
-
-3. Combine Tools When Needed
-
-Complex queries may need 2-3 tool calls
-Example: "Predict next week's top matches" = get_fixtures + predict_match
-
-4. Interpret Results
-
-Predictions are probabilities, not certainties
-Form analysis shows trends, not guarantees
-Consider confidence levels in predictions
-
-5. Graceful Degradation
-
-If predictions unavailable → Offer form analysis instead
-If no matches found → Suggest checking different date range
-If team not found → Suggest similar team names
-
-
-🎓 Understanding ML Predictions
-Model Details
-
-Algorithm: Random Forest (Classifier + Regressors)
-Training Data: Last 3 seasons of Premier League matches
-Features: Recent form, goals scored/conceded, wins/draws/losses
-Accuracy: ~52% for match results (better than random 33%)
-Goals RMSE: ~1.1 goals (predictions within ±1 goal typically)
-
-Interpreting Predictions
-Win Probabilities:
-
->60% - Strong favorite (high confidence)
-45-55% - Even match (low confidence)
-<40% - Underdog (moderate confidence)
-
-Expected Goals:
-
->2.5 - High-scoring team/match
-1.5-2.5 - Average
-<1.5 - Defensive/low-scoring
-
-Confidence Levels:
-
-High - One outcome >60% likely
-Moderate - One outcome 45-60% likely
-Low - All outcomes close (<45% each)
-
-What Predictions Consider
-✅ Recent form (last 5 matches)
-✅ Goals scored/conceded averages
-✅ Home advantage
-✅ Win/draw/loss records
-✅ Historical patterns
-What Predictions DON'T Consider
-❌ Injuries/suspensions
-❌ Specific player matchups
-❌ Weather conditions
-❌ Managerial changes
-❌ Motivation factors
-Note: Predictions are statistical estimates, not guarantees. Soccer is inherently unpredictable!
-
-📞 Error Handling
-The server provides helpful error messages that guide users to alternative approaches:
-
-Team not found → Suggests correct team names
-No matches → Suggests different date ranges
-ML unavailable → Offers alternative analysis methods
-Rate limit → Explains wait time and batching options
-
-
-🔧 Maintenance
-Recommended Actions
-
-Weekly: Check for API updates
-Monthly: Retrain ML models with new data
-Seasonally: Update competition IDs if needed
-
-Known Issues
-
-Champions League availability may vary (depends on match schedule)
-International breaks = no Premier League matches
-Off-season = limited data available
