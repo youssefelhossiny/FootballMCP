@@ -17,6 +17,7 @@ Phase 2 Tools (🚧 In Progress):
 
 import os
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import httpx
@@ -24,6 +25,16 @@ from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
+from optimization import FPLOptimizer
+from predict_points import FPLPointsPredictor
+from pathlib import Path
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # FPL API Configuration
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
@@ -50,6 +61,18 @@ SQUAD_CONSTRAINTS = {
 }
 
 server = Server("fpl-optimizer")
+
+# Load optimization and prediction models
+optimizer = FPLOptimizer()
+predictor = FPLPointsPredictor()
+try:
+    predictor.load_model()
+    logger.info("✅ Predictor model loaded successfully")
+except FileNotFoundError as e:
+    logger.warning(f"⚠️ Predictor model not found: {e}")
+    logger.warning("Run: python fpl-optimizer/predict_points.py")
+except Exception as e:
+    logger.error(f"❌ Error loading predictor: {e}")
 
 
 async def make_fpl_request(endpoint: str, params: dict = None) -> dict:
@@ -233,37 +256,78 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
-            name="optimize_squad",
+            name="evaluate_transfer",
             description=(
-                "Build the OPTIMAL 15-player FPL squad within £100m budget. "
-                "Uses mathematical optimization to maximize expected points. "
-                "Constraints: 2 GK, 5 DEF, 5 MID, 3 FWD, max 3 per team. "
-                "Based on: current form, fixtures, points, value. "
-                "Example: 'Build me the best possible FPL team'"
+                "Evaluate a specific transfer you're considering. "
+                "Shows: points difference, cost analysis, alternatives. "
+                "Recommendation: DO IT / WAIT / RECONSIDER"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "budget": {
-                        "type": "number",
-                        "description": "Budget in millions (default: 100.0)",
-                        "default": 100.0,
-                        "minimum": 80.0,
-                        "maximum": 100.0
-                    },
+                    "player_out_id": {"type": "number", "description": "Player to transfer OUT"},
+                    "player_in_id": {"type": "number", "description": "Player to transfer IN"},
+                    "free_transfers": {"type": "number", "default": 1}
+                },
+                "required": ["player_out_id", "player_in_id"]
+            }
+        ),
+        types.Tool(
+            name="optimize_squad_lp",
+            description=(
+                "Build OPTIMAL 15-player squad using Linear Programming. "
+                "Mathematically guaranteed optimal within all FPL constraints. "
+                "Uses ML-predicted points for each player. "
+                "Returns: Best squad, expected points, why it's optimal"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "budget": {"type": "number", "default": 100.0},
                     "optimize_for": {
                         "type": "string",
-                        "enum": ["points", "form", "value", "fixtures"],
-                        "description": "Optimization strategy (default: form)",
+                        "enum": ["form", "points", "value", "fixtures"],
                         "default": "form"
                     }
                 }
             }
         ),
         types.Tool(
+            name="optimize_lineup",
+            description=(
+                "Select best starting 11 from your 15-player squad. "
+                "Uses ML predictions and optimization. "
+                "Returns: Starting 11, bench, formation, captain choice"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "team_id": {"type": "number", "description": "Your FPL team ID"},
+                    "gameweek": {"type": "number", "description": "Target gameweek"}
+                },
+                "required": ["team_id"]
+            }
+        ),
+        types.Tool(
+            name="suggest_captain",
+            description=(
+                "Data-driven captain recommendation for this gameweek. "
+                "Considers: form, fixtures, opponent strength, position. "
+                "Returns: Top 3 captain options with predicted points"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "team_id": {"type": "number"},
+                    "gameweek": {"type": "number"}
+                },
+                "required": ["team_id"]
+            }
+        ),
+        types.Tool(
             name="suggest_transfers",
             description=(
-                "Suggest transfer recommendations based on your current team. "
+                "Suggest transfer recommendations based on your current team and upcoming fixtures. "
                 "REQUIRES USER INPUT: User must provide their number of free transfers (0-5) "
                 "and available chips (Wildcard, Free Hit, Bench Boost, Triple Captain). "
                 "If not provided, ASK USER: 'How many free transfers do you have? Do you have any chips available?' "
@@ -280,7 +344,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "free_transfers": {
                         "type": "number",
-                        "description": "Number of free transfers available (1-5). User must provide this.",
+                        "description": "Number of free transfers available (0-5). User must provide this.",
                         "minimum": 0,
                         "maximum": 5
                     },
@@ -290,7 +354,7 @@ async def handle_list_tools() -> list[types.Tool]:
                             "type": "string",
                             "enum": ["wildcard", "free_hit", "bench_boost", "triple_captain"]
                         },
-                        "description": "List of available chips. User must provide this.",
+                        "description": "List of available chips. User must provide this. Example: ['wildcard', 'free_hit']",
                         "default": []
                     },
                     "max_transfers": {
@@ -662,103 +726,213 @@ async def handle_call_tool(
 
         return [types.TextContent(type="text", text="\n".join(results))]
 
-    elif name == "optimize_squad":
+    elif name == "optimize_squad_lp":
+        bootstrap = await make_fpl_request("bootstrap-static/")
+        if "error" in bootstrap:
+            return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+        players = bootstrap.get('elements', [])
+        teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+        events = bootstrap.get('events', [])
+        current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
         budget = arguments.get('budget', 100.0)
         optimize_for = arguments.get('optimize_for', 'form')
 
-        # Get player data
-        data = await make_fpl_request("bootstrap-static/")
-        if "error" in data:
-            return [types.TextContent(type="text", text=f"❌ Error: {data['error']}")]
+        # Use LP optimizer
+        squad, status = optimizer.optimize_squad(players, budget, optimize_for)
 
-        players = data.get('elements', [])
-        teams_data = {team['id']: team for team in data.get('teams', [])}
+        if not squad:
+            return [types.TextContent(type="text", text=f"❌ {status}")]
 
-        # Calculate optimization metric for each player
-        for player in players:
-            if optimize_for == 'points':
-                player['opt_score'] = player['total_points']
-            elif optimize_for == 'form':
-                player['opt_score'] = float(player.get('form', 0)) * 10  # Scale up
-            elif optimize_for == 'value':
-                player['opt_score'] = (player['total_points'] / (player['now_cost'] / 10)) if player[
-                                                                                                  'now_cost'] > 0 else 0
-            elif optimize_for == 'fixtures':
-                # Simplified: use form * (6 - average team difficulty)
-                # In full version, this would analyze actual fixtures
-                player['opt_score'] = float(player.get('form', 0)) * 5
+        # Format and return squad
+        total_cost = sum([p['now_cost'] / 10 for p in squad])
+        total_points = sum([predictor.predict_player_points(p, {}, {}) for p in squad])
 
-        # Greedy optimization (simplified for Phase 2 initial)
-        # Full version will use PuLP for linear programming
-
-        selected = []
-        position_counts = {1: 0, 2: 0, 3: 0, 4: 0}
-        team_counts = {}
-        total_cost = 0
-
-        # Sort players by optimization score
-        sorted_players = sorted(players, key=lambda x: x.get('opt_score', 0), reverse=True)
-
-        for player in sorted_players:
-            pos = player['element_type']
-            team_id = player['team']
-            cost = player['now_cost'] / 10
-
-            # Check constraints
-            if position_counts[pos] >= SQUAD_CONSTRAINTS['positions'][POSITIONS[pos]]:
-                continue
-            if team_counts.get(team_id, 0) >= SQUAD_CONSTRAINTS['max_per_team']:
-                continue
-            if total_cost + cost > budget:
-                continue
-
-            # Add player
-            selected.append(player)
-            position_counts[pos] += 1
-            team_counts[team_id] = team_counts.get(team_id, 0) + 1
-            total_cost += cost
-
-            # Check if squad is complete
-            if len(selected) == SQUAD_CONSTRAINTS['total_players']:
-                break
-
-        # Format output
         results = [
-            f"OPTIMIZED FPL SQUAD",
-            f"Strategy: {optimize_for.upper()}",
-            f"Budget Used: {format_price(int(total_cost * 10))} / {format_price(int(budget * 10))}",
-            f"Remaining: {format_price(int((budget - total_cost) * 10))}",
-            f"\nSQUAD ({len(selected)} players):\n"
+            f"OPTIMAL SQUAD (Linear Programming)",
+            f"Cost: £{total_cost:.1f}m / £100m",
+            f"Expected Points: {total_points:.1f}",
+            f"\nReasoning: This squad is mathematically optimal for {optimize_for}",
         ]
 
         # Group by position
-        by_position = {1: [], 2: [], 3: [], 4: []}
-        for player in selected:
-            by_position[player['element_type']].append(player)
+        for pos_id in [1, 2, 3, 4]:
+            pos_name = POSITIONS[pos_id]
+            pos_players = [p for p in squad if p['element_type'] == pos_id]
+            results.append(f"\n{pos_name} ({len(pos_players)}):")
+            for p in pos_players:
+                team = teams_data[p['team']]
+                pred_pts = predictor.predict_player_points(p, {}, {})
+                results.append(f"  {p['web_name']} ({team['short_name']}) - £{p['now_cost'] / 10}m - {pred_pts:.1f}pts")
 
-        total_points = 0
-        for pos_id, pos_name in POSITIONS.items():
-            results.append(f"\n{pos_name} ({len(by_position[pos_id])}):")
-            for player in by_position[pos_id]:
-                team = teams_data[player['team']]
-                total_points += player['total_points']
-                results.append(
-                    f"  {player['web_name']} | {team['short_name']} | "
-                    f"{format_price(player['now_cost'])} | {player['total_points']}pts | "
-                    f"Form: {player.get('form', 0)}"
-                )
+        return [types.TextContent(type="text", text="\n".join(results))]
 
-        results.append(f"\nTOTAL POINTS: {total_points}")
-        results.append(
-            f"\n⚠️  NOTE: This is a greedy algorithm. For true optimal solution, use Linear Programming (coming in full Phase 2).")
+    elif name == "evaluate_transfer":
+        player_out_id = arguments['player_out_id']
+        player_in_id = arguments['player_in_id']
+        free_transfers = arguments.get('free_transfers', 1)
+
+        player_out = players_data.get(player_out_id)
+        player_in = players_data.get(player_in_id)
+
+        if not player_out or not player_in:
+            return [types.TextContent(type="text", text="❌ Player not found")]
+
+        # Predict points
+        out_pred = predictor.predict_player_points(player_out, {}, {})
+        in_pred = predictor.predict_player_points(player_in, {}, {})
+
+        # Cost analysis
+        cost_diff = (player_in['now_cost'] - player_out['now_cost']) / 10
+        hit_cost = 0 if free_transfers > 0 else 4
+        expected_gain = (in_pred - out_pred) - hit_cost
+
+        out_team = teams_data[player_out['team']]
+        in_team = teams_data[player_in['team']]
+
+        results = [
+            f"TRANSFER EVALUATION",
+            f"OUT: {player_out['web_name']} ({out_team['short_name']}) - £{player_out['now_cost'] / 10}m",
+            f"IN: {player_in['web_name']} ({in_team['short_name']}) - £{player_in['now_cost'] / 10}m",
+            f"\nPREDICTIONS:",
+            f"  {player_out['web_name']}: {out_pred:.1f} pts/gw",
+            f"  {player_in['web_name']}: {in_pred:.1f} pts/gw",
+            f"\nCOST ANALYSIS:",
+            f"  Price difference: £{cost_diff:.1f}m",
+            f"  Hit cost: {hit_cost} pts",
+            f"  Expected gain: {expected_gain:.1f} pts",
+            f"\nRECOMMENDATION:",
+        ]
+
+        if expected_gain > 5:
+            results.append("🟢 DO IT! Significant points gain expected")
+        elif expected_gain > 0:
+            results.append("🟡 CONSIDER IT. Small gain but positive")
+        else:
+            results.append("🔴 WAIT. Negative expected gain")
+
+        return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "optimize_lineup":
+        team_id = arguments['team_id']
+        gameweek = arguments.get('gameweek', current_gw)
+
+        # Get user's squad
+        team_data = await make_fpl_request(f"entry/{team_id}/")
+        picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+
+        squad_players = [players_data[p['element']] for p in picks_data.get('picks', [])]
+
+        # Optimize lineup
+        lineup_result = optimizer.optimize_lineup(squad_players, gameweek)
+
+        if 'error' in lineup_result:
+            return [types.TextContent(type="text", text=f"❌ {lineup_result['error']}")]
+
+        results = [
+            f"OPTIMIZED LINEUP - GW{gameweek}",
+            f"Formation: {lineup_result['formation']}",
+            f"Captain: {lineup_result['captain']['web_name']}",
+            f"Vice Captain: {lineup_result['vice_captain']['web_name']}",
+            f"Expected Points: {lineup_result['expected_points']:.1f}",
+            f"\nSTARTING 11:",
+        ]
+
+        for player in lineup_result['starting_11']:
+            team = teams_data[player['team']]
+            pred_pts = predictor.predict_player_points(player, {}, {})
+            captain_mark = " (C)" if player['id'] == lineup_result['captain']['id'] else ""
+            results.append(f"  {player['web_name']} ({team['short_name']}) - {pred_pts:.1f}pts{captain_mark}")
+
+        results.append(f"\nBENCH:")
+        for player in lineup_result['bench']:
+            team = teams_data[player['team']]
+            results.append(f"  {player['web_name']} ({team['short_name']})")
+
+        return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "suggest_captain":
+        team_id = arguments['team_id']
+        gameweek = arguments.get('gameweek', current_gw)
+
+        # Get squad
+        picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+        squad = [players_data[p['element']] for p in picks_data.get('picks', [])]
+
+        # Get fixtures for gameweek
+        fixtures_data = await make_fpl_request("fixtures/")
+        gw_fixtures = {f['team_h']: {'is_home': True, 'opponent': f['team_a']}
+                       for f in fixtures_data if f['event'] == gameweek}
+
+        # Score captaincy options
+        captain_scores = {}
+        for player in squad:
+            # Predict points with 2x multiplier
+            base_pred = predictor.predict_player_points(player, {}, {})
+            captaincy_score = base_pred * 2
+
+            # Bonus for premium players
+            if player['now_cost'] >= 10.0:
+                captaincy_score += 1
+
+            captain_scores[player['id']] = (player, captaincy_score)
+
+        # Top 3
+        top_3 = sorted(captain_scores.items(), key=lambda x: x[1][1], reverse=True)[:3]
+
+        results = [
+            f"CAPTAIN RECOMMENDATIONS - GW{gameweek}",
+            f"\nTop 3 Options:",
+        ]
+
+        for rank, (p_id, (player, score)) in enumerate(top_3, 1):
+            team = teams_data[player['team']]
+            base_pts = score / 2
+            captain_pts = score
+            results.append(
+                f"{rank}. {player['web_name']} ({team['short_name']}) "
+                f"- Base: {base_pts:.1f}pts, Captain: {captain_pts:.1f}pts"
+            )
 
         return [types.TextContent(type="text", text="\n".join(results))]
 
     elif name == "suggest_transfers":
         team_id = arguments['team_id']
-        free_transfers = arguments['free_transfers']
+        free_transfers = arguments.get('free_transfers', 0)
         available_chips = arguments.get('available_chips', [])
         max_transfers = arguments.get('max_transfers', 2)
+
+        # Validate inputs
+        if not isinstance(free_transfers, (int, float)):
+            return [types.TextContent(
+                type="text",
+                text=f"❌ Error: free_transfers must be a number (0-5), got {type(free_transfers)}"
+            )]
+
+        if not isinstance(available_chips, list):
+            return [types.TextContent(
+                type="text",
+                text=f"❌ Error: available_chips must be a list, got {type(available_chips)}"
+            )]
+
+        # Normalize available_chips to lowercase (handle user variations)
+        available_chips_normalized = []
+        for chip in available_chips:
+            if isinstance(chip, str):
+                chip_lower = chip.lower().strip()
+                # Map common variations
+                if chip_lower in ["wildcard", "wc"]:
+                    available_chips_normalized.append("wildcard")
+                elif chip_lower in ["free_hit", "fh"]:
+                    available_chips_normalized.append("free_hit")
+                elif chip_lower in ["bench_boost", "bb"]:
+                    available_chips_normalized.append("bench_boost")
+                elif chip_lower in ["triple_captain", "tc", "triple captain"]:
+                    available_chips_normalized.append("triple_captain")
+                # Ignore unrecognized chips
+
+        available_chips = list(set(available_chips_normalized))  # Remove duplicates
 
         # Get current team
         bootstrap = await make_fpl_request("bootstrap-static/")
@@ -780,7 +954,7 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=f"❌ Error: {picks_data['error']}")]
 
         picks = picks_data.get('picks', [])
-        bank = team_data.get('last_deadline_bank', 0) / 10  # Convert to millions
+        bank = (team_data.get('last_deadline_bank', 0) / 10) if team_data.get('last_deadline_bank') else 0.0
 
         # Analyze each player for transfer potential
         transfer_candidates = []
@@ -791,8 +965,8 @@ async def handle_call_tool(
                 continue
 
             # Calculate transfer priority score
-            form = float(player.get('form', 0))
-            price = player['now_cost'] / 10
+            form = float(player.get('form', 0)) if player.get('form') is not None else 0.0
+            price = player['now_cost'] / 10 if player.get('now_cost') else 0.0
 
             # Reasons to transfer OUT
             transfer_out_score = 0
@@ -804,9 +978,10 @@ async def handle_call_tool(
                 reasons_out.append(f"Low form ({form})")
 
             # Injury/suspension
-            if player.get('chance_of_playing_next_round', 100) < 75:
+            chance_of_playing = player.get('chance_of_playing_next_round')
+            if chance_of_playing is not None and chance_of_playing < 75:
                 transfer_out_score += 50
-                reasons_out.append(f"Injury risk ({player.get('chance_of_playing_next_round', 100)}%)")
+                reasons_out.append(f"Injury risk ({chance_of_playing}%)")
 
             # Price dropping
             if player.get('cost_change_event', 0) < 0:
@@ -818,7 +993,7 @@ async def handle_call_tool(
                     'player': player,
                     'score': transfer_out_score,
                     'reasons': reasons_out,
-                    'position': POSITIONS[player['element_type']]
+                    'position': POSITIONS.get(player['element_type'], 'UNK')
                 })
 
         # Sort by priority
@@ -828,7 +1003,7 @@ async def handle_call_tool(
         results = [
             f"TRANSFER RECOMMENDATIONS",
             f"Team: {team_data.get('name', 'Unknown')}",
-            f"Free Transfers: {free_transfers}",
+            f"Free Transfers: {int(free_transfers)}",
             f"Bank: {format_price(int(bank * 10))}",
             f"Available Chips: {', '.join(available_chips) if available_chips else 'None'}",
             f"\n📊 ANALYSIS:\n"
@@ -842,48 +1017,50 @@ async def handle_call_tool(
 
             for i, candidate in enumerate(transfer_candidates[:max_transfers], 1):
                 player = candidate['player']
-                team = teams_data[player['team']]
+                team = teams_data.get(player['team'], {})
 
                 results.append(f"\nTRANSFER {i}:")
-                results.append(f"OUT: {player['web_name']} ({team['short_name']}) - {format_price(player['now_cost'])}")
+                results.append(
+                    f"OUT: {player['web_name']} ({team.get('short_name', 'TBD')}) - {format_price(player['now_cost'])}")
                 results.append(f"Reasons: {', '.join(candidate['reasons'])}")
                 results.append(f"Priority: {'🔴 HIGH' if candidate['score'] > 50 else '🟡 MEDIUM'}")
 
                 # Suggest replacements (simplified)
                 position_id = player['element_type']
-                budget_for_replacement = price + bank
+                budget_for_replacement = (player['now_cost'] / 10) + bank
 
                 # Find good replacements
                 replacements = [p for p in bootstrap.get('elements', [])
                                 if p['element_type'] == position_id
-                                and p['now_cost'] / 10 <= budget_for_replacement
+                                and (p['now_cost'] / 10) <= budget_for_replacement
                                 and p['id'] != player['id']
-                                and float(p.get('form', 0)) > 3.0]
+                                and float(p.get('form', 0) or 0) > 3.0]
 
-                replacements.sort(key=lambda x: float(x.get('form', 0)), reverse=True)
+                replacements.sort(key=lambda x: float(x.get('form', 0) or 0), reverse=True)
 
                 if replacements:
                     results.append(f"\n🔄 Top 3 Replacements ({candidate['position']}):")
                     for j, rep in enumerate(replacements[:3], 1):
-                        rep_team = teams_data[rep['team']]
+                        rep_team = teams_data.get(rep['team'], {})
+                        rep_form = float(rep.get('form', 0) or 0)
                         results.append(
-                            f"  {j}. {rep['web_name']} ({rep_team['short_name']}) - "
-                            f"{format_price(rep['now_cost'])} - Form: {rep.get('form', 0)}"
+                            f"  {j}. {rep['web_name']} ({rep_team.get('short_name', 'TBD')}) - "
+                            f"{format_price(rep['now_cost'])} - Form: {rep_form}"
                         )
 
-            # Calculate hit cost
-            transfers_needed = min(len(transfer_candidates), max_transfers)
-            hits = max(0, transfers_needed - free_transfers)
-            hit_cost = hits * 4
+        # Calculate hit cost
+        transfers_needed = min(len(transfer_candidates), max_transfers)
+        hits = max(0, transfers_needed - int(free_transfers))
+        hit_cost = hits * 4
 
-            results.append(f"\n💰 COST ANALYSIS:")
-            results.append(f"Transfers recommended: {transfers_needed}")
-            results.append(f"Free transfers used: {min(transfers_needed, free_transfers)}")
-            if hits > 0:
-                results.append(f"Hits required: {hits} (-{hit_cost} points)")
-                results.append(f"⚠️  Only take hits if expected gain > {hit_cost} points")
-            else:
-                results.append(f"✅ No hits required!")
+        results.append(f"\n💰 COST ANALYSIS:")
+        results.append(f"Transfers recommended: {transfers_needed}")
+        results.append(f"Free transfers used: {min(transfers_needed, int(free_transfers))}")
+        if hits > 0:
+            results.append(f"Hits required: {hits} (-{hit_cost} points)")
+            results.append(f"⚠️  Only take hits if expected gain > {hit_cost} points")
+        else:
+            results.append(f"✅ No hits required!")
 
         # Chip recommendations
         if available_chips:

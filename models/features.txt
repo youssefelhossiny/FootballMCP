@@ -1,0 +1,17 @@
+form
+total_points
+minutes
+goals_scored
+assists
+clean_sheets
+goals_conceded
+bonus
+bps
+influence
+creativity
+threat
+ict_index
+now_cost
+selected_by_percent
+element_type
+team
