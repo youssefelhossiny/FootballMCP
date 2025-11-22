@@ -1,0 +1,15 @@
+home_goals_scored_avg
+home_goals_conceded_avg
+home_form
+home_wins
+home_draws
+home_losses
+away_goals_scored_avg
+away_goals_conceded_avg
+away_form
+away_wins
+away_draws
+away_losses
+h2h_home_wins
+h2h_away_wins
+h2h_draws
