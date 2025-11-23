@@ -195,6 +195,21 @@ class FPLPointsPredictor:
 
         return {p['id']: pred for p, pred in zip(players, predictions)}
 
+    def predict_player_points(self, player: Dict, fixtures: Dict = None, teams: Dict = None) -> float:
+        """
+        Predict points for a single player (wrapper for Server.py compatibility)
+
+        Args:
+            player: Player dictionary from FPL API
+            fixtures: Optional fixtures data (unused, for interface compatibility)
+            teams: Optional teams data (unused, for interface compatibility)
+
+        Returns:
+            Predicted points for next gameweek
+        """
+        predictions = self.predict([player])
+        return predictions.get(player['id'], 0.0)
+
 
 class FPLOptimizer:
     """

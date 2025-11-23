@@ -27,6 +27,8 @@ from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 from optimization import FPLOptimizer
 from predict_points import FPLPointsPredictor
+from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
+from chips_strategy import ChipsStrategyAnalyzer
 from pathlib import Path
 
 # Setup logging
@@ -64,6 +66,9 @@ server = Server("fpl-optimizer")
 
 # Load optimization and prediction models
 optimizer = FPLOptimizer()
+enhanced_optimizer = EnhancedOptimizer()
+fixture_analyzer = FixtureAnalyzer()
+chips_analyzer = ChipsStrategyAnalyzer()
 predictor = FPLPointsPredictor()
 try:
     predictor.load_model()
@@ -275,19 +280,58 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="optimize_squad_lp",
             description=(
-                "Build OPTIMAL 15-player squad using Linear Programming. "
-                "Mathematically guaranteed optimal within all FPL constraints. "
-                "Uses ML-predicted points for each player. "
-                "Returns: Best squad, expected points, why it's optimal"
+                "Build OPTIMAL 15-player squad from scratch using Enhanced Optimization. "
+                "Features: Multi-gameweek fixture analysis (next 3-5 GWs), bench cost minimization, "
+                "budget maximization (uses £99-99.5m), identifies best starting 11. "
+                "Smart bench strategy: fills bench with cheapest viable players to maximize budget for starters. "
+                "Returns: Squad with starting 11/bench breakdown, expected points, fixture analysis"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "budget": {"type": "number", "default": 100.0},
+                    "budget": {
+                        "type": "number",
+                        "default": 100.0,
+                        "description": "Maximum budget (default £100m)"
+                    },
                     "optimize_for": {
                         "type": "string",
                         "enum": ["form", "points", "value", "fixtures"],
-                        "default": "form"
+                        "default": "fixtures",
+                        "description": "Optimization strategy (fixtures = best for multi-GW)"
+                    },
+                    "target_spend": {
+                        "type": "number",
+                        "default": 100.0,
+                        "description": "Target spending (default £100m - use maximum budget, min £99m)"
+                    },
+                    "num_gameweeks": {
+                        "type": "number",
+                        "default": 5,
+                        "description": "Number of gameweeks to analyze (default 5)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="analyze_fixtures",
+            description=(
+                "Analyze upcoming fixtures for next 3-5 gameweeks. "
+                "Returns fixture difficulty ratings (FDR), identifies teams with good/bad runs, "
+                "highlights double gameweeks, shows which teams to target/avoid. "
+                "Use before making transfers or building squads."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_gameweeks": {
+                        "type": "number",
+                        "default": 5,
+                        "description": "Number of gameweeks to analyze"
+                    },
+                    "team_filter": {
+                        "type": "string",
+                        "description": "Optional: filter by team name (e.g., 'Arsenal', 'Liverpool')"
                     }
                 }
             }
@@ -322,6 +366,33 @@ async def handle_list_tools() -> list[types.Tool]:
                     "gameweek": {"type": "number"}
                 },
                 "required": ["team_id"]
+            }
+        ),
+        types.Tool(
+            name="suggest_chips_strategy",
+            description=(
+                "Strategic recommendations for when to use your FPL chips. "
+                "Analyzes upcoming fixtures to find optimal timing for: "
+                "Wildcard (unlimited transfers), Bench Boost (bench scores), "
+                "Triple Captain (3x points), Free Hit (one-week team). "
+                "Identifies double/blank gameweeks and fixture swings. "
+                "REQUIRES: List of available chips (e.g., ['Wildcard', 'Bench Boost'])"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "available_chips": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Chips you still have (e.g., ['Wildcard', 'Triple Captain'])"
+                    },
+                    "num_gameweeks": {
+                        "type": "number",
+                        "default": 10,
+                        "description": "How many GWs ahead to analyze (default 10)"
+                    }
+                },
+                "required": ["available_chips"]
             }
         ),
         types.Tool(
@@ -727,175 +798,437 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text="\n".join(results))]
 
     elif name == "optimize_squad_lp":
-        bootstrap = await make_fpl_request("bootstrap-static/")
-        if "error" in bootstrap:
-            return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+        try:
+            # Handle None arguments
+            if arguments is None:
+                arguments = {}
 
-        players = bootstrap.get('elements', [])
-        teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
-        events = bootstrap.get('events', [])
-        current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+            logger.info(f"🔄 Optimizing squad with arguments: {arguments}")
 
-        budget = arguments.get('budget', 100.0)
-        optimize_for = arguments.get('optimize_for', 'form')
+            # Fetch data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
 
-        # Use LP optimizer
-        squad, status = optimizer.optimize_squad(players, budget, optimize_for)
+            fixtures_data = await make_fpl_request("fixtures/")
+            if "error" in fixtures_data:
+                logger.warning("Could not fetch fixtures, using basic optimization")
+                fixtures_data = []
 
-        if not squad:
-            return [types.TextContent(type="text", text=f"❌ {status}")]
+            players = bootstrap.get('elements', [])
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+            events = bootstrap.get('events', [])
+            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
 
-        # Format and return squad
-        total_cost = sum([p['now_cost'] / 10 for p in squad])
-        total_points = sum([predictor.predict_player_points(p, {}, {}) for p in squad])
+            budget = arguments.get('budget', 100.0)
+            optimize_for = arguments.get('optimize_for', 'fixtures')
+            target_spend = arguments.get('target_spend', 100.0)  # Use maximum budget
+            num_gws = arguments.get('num_gameweeks', 5)
 
-        results = [
-            f"OPTIMAL SQUAD (Linear Programming)",
-            f"Cost: £{total_cost:.1f}m / £100m",
-            f"Expected Points: {total_points:.1f}",
-            f"\nReasoning: This squad is mathematically optimal for {optimize_for}",
-        ]
+            logger.info(f"📊 Using enhanced optimizer: budget=£{budget}m, target=£{target_spend}m, strategy={optimize_for}, GWs={num_gws}")
 
-        # Group by position
-        for pos_id in [1, 2, 3, 4]:
-            pos_name = POSITIONS[pos_id]
-            pos_players = [p for p in squad if p['element_type'] == pos_id]
-            results.append(f"\n{pos_name} ({len(pos_players)}):")
-            for p in pos_players:
-                team = teams_data[p['team']]
-                pred_pts = predictor.predict_player_points(p, {}, {})
-                results.append(f"  {p['web_name']} ({team['short_name']}) - £{p['now_cost'] / 10}m - {pred_pts:.1f}pts")
-
-        return [types.TextContent(type="text", text="\n".join(results))]
-
-    elif name == "evaluate_transfer":
-        player_out_id = arguments['player_out_id']
-        player_in_id = arguments['player_in_id']
-        free_transfers = arguments.get('free_transfers', 1)
-
-        player_out = players_data.get(player_out_id)
-        player_in = players_data.get(player_in_id)
-
-        if not player_out or not player_in:
-            return [types.TextContent(type="text", text="❌ Player not found")]
-
-        # Predict points
-        out_pred = predictor.predict_player_points(player_out, {}, {})
-        in_pred = predictor.predict_player_points(player_in, {}, {})
-
-        # Cost analysis
-        cost_diff = (player_in['now_cost'] - player_out['now_cost']) / 10
-        hit_cost = 0 if free_transfers > 0 else 4
-        expected_gain = (in_pred - out_pred) - hit_cost
-
-        out_team = teams_data[player_out['team']]
-        in_team = teams_data[player_in['team']]
-
-        results = [
-            f"TRANSFER EVALUATION",
-            f"OUT: {player_out['web_name']} ({out_team['short_name']}) - £{player_out['now_cost'] / 10}m",
-            f"IN: {player_in['web_name']} ({in_team['short_name']}) - £{player_in['now_cost'] / 10}m",
-            f"\nPREDICTIONS:",
-            f"  {player_out['web_name']}: {out_pred:.1f} pts/gw",
-            f"  {player_in['web_name']}: {in_pred:.1f} pts/gw",
-            f"\nCOST ANALYSIS:",
-            f"  Price difference: £{cost_diff:.1f}m",
-            f"  Hit cost: {hit_cost} pts",
-            f"  Expected gain: {expected_gain:.1f} pts",
-            f"\nRECOMMENDATION:",
-        ]
-
-        if expected_gain > 5:
-            results.append("🟢 DO IT! Significant points gain expected")
-        elif expected_gain > 0:
-            results.append("🟡 CONSIDER IT. Small gain but positive")
-        else:
-            results.append("🔴 WAIT. Negative expected gain")
-
-        return [types.TextContent(type="text", text="\n".join(results))]
-
-    elif name == "optimize_lineup":
-        team_id = arguments['team_id']
-        gameweek = arguments.get('gameweek', current_gw)
-
-        # Get user's squad
-        team_data = await make_fpl_request(f"entry/{team_id}/")
-        picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
-
-        squad_players = [players_data[p['element']] for p in picks_data.get('picks', [])]
-
-        # Optimize lineup
-        lineup_result = optimizer.optimize_lineup(squad_players, gameweek)
-
-        if 'error' in lineup_result:
-            return [types.TextContent(type="text", text=f"❌ {lineup_result['error']}")]
-
-        results = [
-            f"OPTIMIZED LINEUP - GW{gameweek}",
-            f"Formation: {lineup_result['formation']}",
-            f"Captain: {lineup_result['captain']['web_name']}",
-            f"Vice Captain: {lineup_result['vice_captain']['web_name']}",
-            f"Expected Points: {lineup_result['expected_points']:.1f}",
-            f"\nSTARTING 11:",
-        ]
-
-        for player in lineup_result['starting_11']:
-            team = teams_data[player['team']]
-            pred_pts = predictor.predict_player_points(player, {}, {})
-            captain_mark = " (C)" if player['id'] == lineup_result['captain']['id'] else ""
-            results.append(f"  {player['web_name']} ({team['short_name']}) - {pred_pts:.1f}pts{captain_mark}")
-
-        results.append(f"\nBENCH:")
-        for player in lineup_result['bench']:
-            team = teams_data[player['team']]
-            results.append(f"  {player['web_name']} ({team['short_name']})")
-
-        return [types.TextContent(type="text", text="\n".join(results))]
-
-    elif name == "suggest_captain":
-        team_id = arguments['team_id']
-        gameweek = arguments.get('gameweek', current_gw)
-
-        # Get squad
-        picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
-        squad = [players_data[p['element']] for p in picks_data.get('picks', [])]
-
-        # Get fixtures for gameweek
-        fixtures_data = await make_fpl_request("fixtures/")
-        gw_fixtures = {f['team_h']: {'is_home': True, 'opponent': f['team_a']}
-                       for f in fixtures_data if f['event'] == gameweek}
-
-        # Score captaincy options
-        captain_scores = {}
-        for player in squad:
-            # Predict points with 2x multiplier
-            base_pred = predictor.predict_player_points(player, {}, {})
-            captaincy_score = base_pred * 2
-
-            # Bonus for premium players
-            if player['now_cost'] >= 10.0:
-                captaincy_score += 1
-
-            captain_scores[player['id']] = (player, captaincy_score)
-
-        # Top 3
-        top_3 = sorted(captain_scores.items(), key=lambda x: x[1][1], reverse=True)[:3]
-
-        results = [
-            f"CAPTAIN RECOMMENDATIONS - GW{gameweek}",
-            f"\nTop 3 Options:",
-        ]
-
-        for rank, (p_id, (player, score)) in enumerate(top_3, 1):
-            team = teams_data[player['team']]
-            base_pts = score / 2
-            captain_pts = score
-            results.append(
-                f"{rank}. {player['web_name']} ({team['short_name']}) "
-                f"- Base: {base_pts:.1f}pts, Captain: {captain_pts:.1f}pts"
+            # Use Enhanced Optimizer
+            squad, lineup_info, status = enhanced_optimizer.optimize_squad_with_fixtures(
+                players=players,
+                fixtures=fixtures_data,
+                teams=teams_data,
+                current_gw=current_gw,
+                budget=budget,
+                optimize_for=optimize_for,
+                target_spend=target_spend,
+                num_gws=num_gws
             )
 
-        return [types.TextContent(type="text", text="\n".join(results))]
+            if not squad:
+                return [types.TextContent(type="text", text=f"❌ {status}")]
+
+            logger.info(f"✅ Squad optimized: {len(squad)} players, cost=£{lineup_info['total_cost']:.1f}m")
+
+            # Format results
+            results = [
+                f"🎯 OPTIMAL SQUAD (Enhanced Multi-GW Optimization)",
+                f"📅 Analyzed: GW{current_gw} to GW{current_gw + num_gws - 1}",
+                f"💰 Cost: £{lineup_info['total_cost']:.1f}m / £{budget}m",
+                f"💵 Remaining: £{lineup_info['money_remaining']:.1f}m",
+                f"⚡ Expected Points (next {num_gws} GWs): {lineup_info['expected_points']:.1f}",
+                f"📐 Formation: {lineup_info['formation']}",
+                f"\n🟢 STARTING 11:",
+            ]
+
+            # Show starting 11
+            for player in lineup_info['starting_11']:
+                team = teams_data[player['team']]
+                pos = POSITIONS[player['element_type']]
+                pred_pts = predictor.predict_player_points(player, {}, {})
+                results.append(
+                    f"  {pos} | {player['web_name']} ({team['short_name']}) - "
+                    f"£{player['now_cost'] / 10}m - {pred_pts:.1f}pts/gw"
+                )
+
+            # Show bench
+            results.append(f"\n🪑 BENCH (Cost-minimized):")
+            bench_cost = sum([p['now_cost'] / 10 for p in lineup_info['bench']])
+            results.append(f"  Total bench cost: £{bench_cost:.1f}m")
+            for player in lineup_info['bench']:
+                team = teams_data[player['team']]
+                pos = POSITIONS[player['element_type']]
+                results.append(
+                    f"  {pos} | {player['web_name']} ({team['short_name']}) - £{player['now_cost'] / 10}m"
+                )
+
+            results.append(f"\n💡 Strategy: Optimized for {optimize_for} over next {num_gws} gameweeks")
+            results.append(f"📈 Smart bench: Cheap enablers to maximize starting 11 budget")
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in optimize_squad_lp: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error optimizing squad: {str(e)}\nCheck logs for details.")]
+
+    elif name == "analyze_fixtures":
+        try:
+            if arguments is None:
+                arguments = {}
+
+            logger.info(f"🔄 Analyzing fixtures with arguments: {arguments}")
+
+            # Fetch data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+            fixtures_data = await make_fpl_request("fixtures/")
+            if "error" in fixtures_data:
+                return [types.TextContent(type="text", text="❌ Could not fetch fixtures data")]
+
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+            events = bootstrap.get('events', [])
+            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            num_gws = arguments.get('num_gameweeks', 5)
+            team_filter = arguments.get('team_filter', '').lower()
+
+            logger.info(f"📊 Analyzing next {num_gws} gameweeks from GW{current_gw}")
+
+            # Analyze fixtures
+            analysis = fixture_analyzer.analyze_fixtures(
+                fixtures_data, teams_data, current_gw, num_gws
+            )
+
+            # Sort teams by difficulty score (easier fixtures first)
+            sorted_teams = sorted(
+                analysis.items(),
+                key=lambda x: x[1]['difficulty_score'],
+                reverse=True
+            )
+
+            # Filter if requested
+            if team_filter:
+                sorted_teams = [
+                    (tid, data) for tid, data in sorted_teams
+                    if team_filter in teams_data[tid]['name'].lower() or
+                       team_filter in teams_data[tid]['short_name'].lower()
+                ]
+
+            results = [
+                f"📅 FIXTURE ANALYSIS: GW{current_gw} to GW{current_gw + num_gws - 1}",
+                f"\n🟢 EASIEST FIXTURES (Target these teams):",
+            ]
+
+            # Show top 5 easiest
+            for team_id, data in sorted_teams[:5]:
+                team = teams_data[team_id]
+                fdr_rating = "⭐" * max(1, 6 - int(data['fdr_avg']))
+                double_marker = " 🔥 DOUBLE!" if data.get('has_doubles') else ""
+                results.append(
+                    f"  {team['short_name']:<4} | FDR: {data['fdr_avg']:.1f} {fdr_rating} | "
+                    f"{data['num_fixtures']} fixtures{double_marker}"
+                )
+
+            results.append(f"\n🔴 HARDEST FIXTURES (Avoid these teams):")
+
+            # Show bottom 5 hardest
+            for team_id, data in sorted_teams[-5:]:
+                team = teams_data[team_id]
+                results.append(
+                    f"  {team['short_name']:<4} | FDR: {data['fdr_avg']:.1f} | "
+                    f"{data['num_fixtures']} fixtures"
+                )
+
+            results.append(f"\n💡 Tip: Use 'optimize_squad_lp' with optimize_for='fixtures' to build around easy fixtures")
+            results.append(f"📊 FDR Scale: 1=Very Easy ⭐⭐⭐⭐⭐ → 5=Very Hard ⭐")
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in analyze_fixtures: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error analyzing fixtures: {str(e)}")]
+
+    elif name == "evaluate_transfer":
+        try:
+            # Handle None arguments
+            if arguments is None:
+                arguments = {}
+
+            # Fetch bootstrap data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+            players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+
+            player_out_id = arguments.get('player_out_id')
+            player_in_id = arguments.get('player_in_id')
+
+            if not player_out_id or not player_in_id:
+                return [types.TextContent(type="text", text="❌ Missing required parameters: player_out_id and player_in_id")]
+
+            free_transfers = arguments.get('free_transfers', 1)
+
+            player_out = players_data.get(player_out_id)
+            player_in = players_data.get(player_in_id)
+
+            if not player_out or not player_in:
+                return [types.TextContent(type="text", text="❌ Player not found")]
+
+            # Predict points
+            out_pred = predictor.predict_player_points(player_out, {}, {})
+            in_pred = predictor.predict_player_points(player_in, {}, {})
+
+            # Cost analysis
+            cost_diff = (player_in['now_cost'] - player_out['now_cost']) / 10
+            hit_cost = 0 if free_transfers > 0 else 4
+            expected_gain = (in_pred - out_pred) - hit_cost
+
+            out_team = teams_data[player_out['team']]
+            in_team = teams_data[player_in['team']]
+
+            results = [
+                f"TRANSFER EVALUATION",
+                f"OUT: {player_out['web_name']} ({out_team['short_name']}) - £{player_out['now_cost'] / 10}m",
+                f"IN: {player_in['web_name']} ({in_team['short_name']}) - £{player_in['now_cost'] / 10}m",
+                f"\nPREDICTIONS:",
+                f"  {player_out['web_name']}: {out_pred:.1f} pts/gw",
+                f"  {player_in['web_name']}: {in_pred:.1f} pts/gw",
+                f"\nCOST ANALYSIS:",
+                f"  Price difference: £{cost_diff:.1f}m",
+                f"  Hit cost: {hit_cost} pts",
+                f"  Expected gain: {expected_gain:.1f} pts",
+                f"\nRECOMMENDATION:",
+            ]
+
+            if expected_gain > 5:
+                results.append("🟢 DO IT! Significant points gain expected")
+            elif expected_gain > 0:
+                results.append("🟡 CONSIDER IT. Small gain but positive")
+            else:
+                results.append("🔴 WAIT. Negative expected gain")
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in evaluate_transfer: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error evaluating transfer: {str(e)}")]
+
+    elif name == "optimize_lineup":
+        try:
+            # Handle None arguments
+            if arguments is None:
+                arguments = {}
+
+            # Fetch bootstrap data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+            players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+            events = bootstrap.get('events', [])
+            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            team_id = arguments.get('team_id')
+            if not team_id:
+                return [types.TextContent(type="text", text="❌ Missing required parameter: team_id")]
+
+            gameweek = arguments.get('gameweek', current_gw)
+
+            # Get user's squad
+            team_data = await make_fpl_request(f"entry/{team_id}/")
+            picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+
+            squad_players = [players_data[p['element']] for p in picks_data.get('picks', [])]
+
+            # Optimize lineup
+            lineup_result = optimizer.optimize_lineup(squad_players, gameweek)
+
+            if 'error' in lineup_result:
+                return [types.TextContent(type="text", text=f"❌ {lineup_result['error']}")]
+
+            results = [
+                f"OPTIMIZED LINEUP - GW{gameweek}",
+                f"Formation: {lineup_result['formation']}",
+                f"Captain: {lineup_result['captain']['web_name']}",
+                f"Vice Captain: {lineup_result['vice_captain']['web_name']}",
+                f"Expected Points: {lineup_result['expected_points']:.1f}",
+                f"\nSTARTING 11:",
+            ]
+
+            for player in lineup_result['starting_11']:
+                team = teams_data[player['team']]
+                pred_pts = predictor.predict_player_points(player, {}, {})
+                captain_mark = " (C)" if player['id'] == lineup_result['captain']['id'] else ""
+                results.append(f"  {player['web_name']} ({team['short_name']}) - {pred_pts:.1f}pts{captain_mark}")
+
+            results.append(f"\nBENCH:")
+            for player in lineup_result['bench']:
+                team = teams_data[player['team']]
+                results.append(f"  {player['web_name']} ({team['short_name']})")
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in optimize_lineup: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error optimizing lineup: {str(e)}")]
+
+    elif name == "suggest_captain":
+        try:
+            # Handle None arguments
+            if arguments is None:
+                arguments = {}
+
+            # Fetch bootstrap data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+            players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+            events = bootstrap.get('events', [])
+            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            team_id = arguments.get('team_id')
+            if not team_id:
+                return [types.TextContent(type="text", text="❌ Missing required parameter: team_id")]
+
+            gameweek = arguments.get('gameweek', current_gw)
+
+            # Get squad
+            picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+            squad = [players_data[p['element']] for p in picks_data.get('picks', [])]
+
+            # Get fixtures for gameweek
+            fixtures_data = await make_fpl_request("fixtures/")
+            gw_fixtures = {f['team_h']: {'is_home': True, 'opponent': f['team_a']}
+                           for f in fixtures_data if f['event'] == gameweek}
+
+            # Score captaincy options
+            captain_scores = {}
+            for player in squad:
+                # Predict points with 2x multiplier
+                base_pred = predictor.predict_player_points(player, {}, {})
+                captaincy_score = base_pred * 2
+
+                # Bonus for premium players
+                if player['now_cost'] >= 10.0:
+                    captaincy_score += 1
+
+                captain_scores[player['id']] = (player, captaincy_score)
+
+            # Top 3
+            top_3 = sorted(captain_scores.items(), key=lambda x: x[1][1], reverse=True)[:3]
+
+            results = [
+                f"CAPTAIN RECOMMENDATIONS - GW{gameweek}",
+                f"\nTop 3 Options:",
+            ]
+
+            for rank, (p_id, (player, score)) in enumerate(top_3, 1):
+                team = teams_data[player['team']]
+                base_pts = score / 2
+                captain_pts = score
+                results.append(
+                    f"{rank}. {player['web_name']} ({team['short_name']}) "
+                    f"- Base: {base_pts:.1f}pts, Captain: {captain_pts:.1f}pts"
+                )
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in suggest_captain: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error suggesting captain: {str(e)}")]
+
+    elif name == "suggest_chips_strategy":
+        try:
+            if arguments is None:
+                arguments = {}
+
+            available_chips = arguments.get('available_chips', [])
+            if not available_chips:
+                return [types.TextContent(type="text", text="❌ Please provide available chips (e.g., ['Wildcard', 'Bench Boost'])")]
+
+            logger.info(f"🎴 Analyzing chips strategy for: {available_chips}")
+
+            # Fetch data
+            bootstrap = await make_fpl_request("bootstrap-static/")
+            if "error" in bootstrap:
+                return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
+
+            fixtures_data = await make_fpl_request("fixtures/")
+            if "error" in fixtures_data:
+                return [types.TextContent(type="text", text="❌ Could not fetch fixtures data")]
+
+            teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+            events = bootstrap.get('events', [])
+            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            num_gws = arguments.get('num_gameweeks', 10)
+
+            # Analyze chips
+            analysis = chips_analyzer.analyze_chips_strategy(
+                available_chips=available_chips,
+                fixtures=fixtures_data,
+                teams=teams_data,
+                current_gw=current_gw,
+                num_gws=num_gws
+            )
+
+            results = [
+                f"🎴 CHIPS STRATEGY ANALYSIS",
+                f"📅 Analyzing GW{current_gw} to GW{current_gw + num_gws - 1}",
+                f"🎯 Available chips: {', '.join(available_chips)}",
+                ""
+            ]
+
+            # Show recommendations for each chip
+            for chip_name, chip_data in analysis.items():
+                chip_display = chip_name.replace('_', ' ').title()
+                results.append(f"\n{'='*50}")
+                results.append(f"🎴 {chip_display.upper()}")
+                results.append(f"{'='*50}")
+
+                if 'recommendations' in chip_data:
+                    for i, rec in enumerate(chip_data['recommendations'][:3], 1):  # Top 3 recommendations
+                        priority_emoji = {
+                            'VERY HIGH': '🔴',
+                            'HIGH': '🟠',
+                            'MEDIUM': '🟡',
+                            'LOW': '🟢'
+                        }.get(rec.get('priority', 'MEDIUM'), '🟡')
+
+                        results.append(f"\n{i}. GW{rec['gameweek']} {priority_emoji} {rec['priority']} PRIORITY")
+                        results.append(f"   Reason: {rec['reason']}")
+                        results.append(f"   Benefit: {rec['benefit']}")
+
+                if 'tip' in chip_data:
+                    results.append(f"\n💡 Tip: {chip_data['tip']}")
+
+                if 'best_gw' in chip_data and chip_data['best_gw']:
+                    results.append(f"✅ Best gameweek: GW{chip_data['best_gw']}")
+
+            results.append(f"\n\n📊 Summary:")
+            results.append(f"Use chips strategically to maximize points over the season.")
+            results.append(f"🔴 = Must use here | 🟠 = Highly recommended | 🟡 = Good option | 🟢 = Can wait")
+
+            return [types.TextContent(type="text", text="\n".join(results))]
+        except Exception as e:
+            logger.error(f"Error in suggest_chips_strategy: {e}", exc_info=True)
+            return [types.TextContent(type="text", text=f"❌ Error analyzing chips: {str(e)}")]
 
     elif name == "suggest_transfers":
         team_id = arguments['team_id']
