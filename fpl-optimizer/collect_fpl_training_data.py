@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Collect real historical FPL data for training the points prediction model
+Collect real historical FPL data + Understat xG/xA for training the points prediction model
+Enhanced with advanced stats integration
 """
 import asyncio
 import sys
@@ -11,10 +12,11 @@ import os
 # Add parent directory to path to import Server
 sys.path.insert(0, str(Path(__file__).parent))
 from Server import make_fpl_request
+from enhanced_features import EnhancedDataCollector
 
 
 async def collect_fpl_training_data():
-    """Collect player stats from FPL API and create training dataset"""
+    """Collect player stats from FPL API + Understat and create training dataset"""
 
     print("🔄 Fetching FPL data from API...")
     data = await make_fpl_request("bootstrap-static/")
@@ -26,15 +28,42 @@ async def collect_fpl_training_data():
     players = data.get('elements', [])
     print(f"✅ Fetched {len(players)} players from FPL API")
 
-    # Filter players with sufficient game time
-    active_players = [p for p in players if int(p.get('minutes', 0)) >= 90]
+    # NEW: Merge with Understat data
+    print("\n🔄 Enhancing with Understat xG/xA data...")
+    collector = EnhancedDataCollector(cache_ttl_hours=6)
+    enhanced_players, match_stats = collector.collect_enhanced_data(
+        players,
+        season="2025",
+        use_cache=True
+    )
+    print(f"✅ Enhanced {len(enhanced_players)} players with Understat data")
+    print(f"   Match rate: {match_stats.get('match_rate', 0):.1f}%\n")
+
+    # Filter players with sufficient game time (use enhanced_players instead)
+    active_players = [p for p in enhanced_players if int(p.get('minutes', 0)) >= 90]
     print(f"   Active players (90+ minutes): {len(active_players)}")
 
     # Convert to training format
     training_records = []
 
     for player in active_players:
+        # Enhanced target prediction using xG/xA
+        xG_per_game = player.get('xG_per_90', 0)
+        xA_per_game = player.get('xA_per_90', 0)
+
+        # FPL points: Goals (4-6pts), Assists (3pts)
+        position = player.get('element_type', 3)
+        if position == 4:  # Forwards get 4pts per goal
+            expected_pts = xG_per_game * 4 + xA_per_game * 3
+        else:  # Others get 5-6pts per goal
+            expected_pts = xG_per_game * 5 + xA_per_game * 3
+
+        # Combine form and xG-based prediction
+        form = float(player.get('form', 0))
+        predicted_next_gw = max(0, round((form + expected_pts) / 2))
+
         record = {
+            # Original FPL features
             'form': float(player.get('form', 0)),
             'total_points': int(player.get('total_points', 0)),
             'minutes': int(player.get('minutes', 0)),
@@ -52,11 +81,20 @@ async def collect_fpl_training_data():
             'selected_by_percent': float(player.get('selected_by_percent', 0)),
             'element_type': int(player.get('element_type', 1)),
             'team': int(player.get('team', 1)),
-            # Target: estimate next gameweek points from form and bonuses
-            'points_next_gw': max(0, round(
-                float(player.get('form', 0)) +
-                (int(player.get('bonus', 0)) / 15)
-            ))
+            # NEW: Understat features
+            'xG': float(player.get('xG', 0)),
+            'xA': float(player.get('xA', 0)),
+            'xG_per_90': float(player.get('xG_per_90', 0)),
+            'xA_per_90': float(player.get('xA_per_90', 0)),
+            'shots': int(player.get('shots', 0)),
+            'shots_on_target': int(player.get('shots_on_target', 0)),
+            'key_passes': int(player.get('key_passes', 0)),
+            'xG_overperformance': float(player.get('xG_overperformance', 0)),
+            # NEW: Derived features
+            'xG_xA_combined': float(player.get('xG_xA_combined', 0)),
+            'finishing_quality': float(player.get('finishing_quality', 1.0)),
+            # Target: Enhanced prediction using xG/xA
+            'points_next_gw': predicted_next_gw
         }
 
         training_records.append(record)
@@ -95,6 +133,10 @@ if __name__ == "__main__":
 
     if df is not None:
         print("\n📊 Training Data Summary:")
-        print(df[['form', 'total_points', 'minutes', 'points_next_gw']].describe())
-        print(f"\n✅ Training data ready!")
-        print(f"   Next step: python fpl-optimizer/predict_points.py")
+        print(df[['form', 'total_points', 'minutes', 'xG', 'xA', 'points_next_gw']].describe())
+        print(f"\n📊 Feature count: {len(df.columns) - 1} features (27 total)")
+        print(f"   - Original FPL: 17 features")
+        print(f"   - Understat: 8 features (xG, xA, shots, etc.)")
+        print(f"   - Derived: 2 features (xG_xA_combined, finishing_quality)")
+        print(f"\n✅ Enhanced training data ready!")
+        print(f"   Next step: python3 fpl-optimizer/predict_points.py")

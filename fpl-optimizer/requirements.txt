@@ -14,3 +14,13 @@ joblib>=1.3.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Advanced Stats Scraping (Phase 2b+)
+understatapi>=0.6.1          # Understat xG/xA data
+aiohttp>=3.9.0               # Async HTTP for understat
+beautifulsoup4>=4.12.0       # HTML parsing
+lxml>=5.0.0                  # XML/HTML parser
+thefuzz>=0.22.0              # Fuzzy string matching
+python-Levenshtein>=0.25.0   # Fast fuzzy matching
+requests>=2.25.0             # HTTP requests
+requests-cache>=1.1.0        # Request caching

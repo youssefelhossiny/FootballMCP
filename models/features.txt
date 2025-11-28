@@ -15,3 +15,13 @@ now_cost
 selected_by_percent
 element_type
 team
+xG
+xA
+xG_per_90
+xA_per_90
+shots
+shots_on_target
+key_passes
+xG_overperformance
+xG_xA_combined
+finishing_quality

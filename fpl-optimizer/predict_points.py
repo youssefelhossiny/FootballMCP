@@ -43,12 +43,19 @@ class FPLPointsPredictor:
         self.features_path = self.model_dir / "features.txt"
         self.importance_path = self.model_dir / "feature_importance.pkl"
 
+        # Original FPL features (17)
         self.feature_columns = [
             'form', 'total_points', 'minutes', 'goals_scored', 'assists',
             'clean_sheets', 'goals_conceded', 'bonus', 'bps', 'influence',
             'creativity', 'threat', 'ict_index', 'now_cost', 'selected_by_percent',
-            'element_type', 'team'
+            'element_type', 'team',
+            # NEW: Understat features (8) - xG/xA advanced stats
+            'xG', 'xA', 'xG_per_90', 'xA_per_90',
+            'shots', 'shots_on_target', 'key_passes', 'xG_overperformance',
+            # NEW: Derived features (2)
+            'xG_xA_combined', 'finishing_quality'
         ]
+        # Total: 27 features (17 FPL + 8 Understat + 2 derived)
 
     def load_model(self):
         """Load trained model from disk"""
@@ -69,11 +76,12 @@ class FPLPointsPredictor:
         logger.info(f"   Features: {len(self.feature_columns)}")
 
     def prepare_features(self, players: List[Dict]) -> pd.DataFrame:
-        """Convert player dicts to feature DataFrame"""
+        """Convert player dicts to feature DataFrame with enhanced stats"""
 
         features = []
         for p in players:
             row = {
+                # Original FPL features
                 'form': float(p.get('form', 0)),
                 'total_points': int(p.get('total_points', 0)),
                 'minutes': int(p.get('minutes', 0)),
@@ -90,7 +98,19 @@ class FPLPointsPredictor:
                 'now_cost': int(p.get('now_cost', 0)) / 10,
                 'selected_by_percent': float(p.get('selected_by_percent', 0)),
                 'element_type': int(p.get('element_type', 1)),
-                'team': int(p.get('team', 1))
+                'team': int(p.get('team', 1)),
+                # NEW: Understat features (with defaults if not present)
+                'xG': float(p.get('xG', 0)),
+                'xA': float(p.get('xA', 0)),
+                'xG_per_90': float(p.get('xG_per_90', 0)),
+                'xA_per_90': float(p.get('xA_per_90', 0)),
+                'shots': int(p.get('shots', 0)),
+                'shots_on_target': int(p.get('shots_on_target', 0)),
+                'key_passes': int(p.get('key_passes', 0)),
+                'xG_overperformance': float(p.get('xG_overperformance', 0)),
+                # NEW: Derived features
+                'xG_xA_combined': float(p.get('xG_xA_combined', 0)),
+                'finishing_quality': float(p.get('finishing_quality', 1.0))
             }
             features.append(row)
 

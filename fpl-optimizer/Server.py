@@ -29,6 +29,7 @@ from optimization import FPLOptimizer
 from predict_points import FPLPointsPredictor
 from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
 from chips_strategy import ChipsStrategyAnalyzer
+from enhanced_features import EnhancedDataCollector
 from pathlib import Path
 
 # Setup logging
@@ -70,6 +71,7 @@ enhanced_optimizer = EnhancedOptimizer()
 fixture_analyzer = FixtureAnalyzer()
 chips_analyzer = ChipsStrategyAnalyzer()
 predictor = FPLPointsPredictor()
+enhanced_collector = EnhancedDataCollector(cache_ttl_hours=6)
 try:
     predictor.load_model()
     logger.info("✅ Predictor model loaded successfully")
@@ -98,6 +100,30 @@ async def make_fpl_request(endpoint: str, params: dict = None) -> dict:
 def format_price(price: int) -> str:
     """Convert price from API format (e.g., 115) to display (£11.5m)"""
     return f"£{price / 10:.1f}m"
+
+
+def enhance_players_with_understat(players: list[dict]) -> tuple[list[dict], dict]:
+    """
+    Enhance FPL player data with Understat xG/xA stats
+
+    Args:
+        players: List of player dicts from FPL API
+
+    Returns:
+        Tuple of (enhanced_players, match_stats)
+    """
+    try:
+        enhanced_players, match_stats = enhanced_collector.collect_enhanced_data(
+            players,
+            season="2025",
+            use_cache=True
+        )
+        logger.info(f"✅ Enhanced {len(enhanced_players)} players with Understat data ({match_stats['match_rate']:.1f}% matched)")
+        return enhanced_players, match_stats
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to enhance with Understat data: {e}")
+        # Return original players if enhancement fails
+        return players, {"match_rate": 0, "methods": {}}
 
 
 @server.list_tools()
@@ -230,18 +256,18 @@ async def handle_list_tools() -> list[types.Tool]:
             name="get_top_performers",
             description=(
                 "Get top performing players ranked by chosen metric. "
-                "Returns ranked list of players with key stats. "
+                "Returns ranked list of players with key stats including xG/xA data. "
                 "Metrics: total_points, form (last 5 GW avg), value (pts/£), "
-                "ownership %, transfers_in this GW, bonus points. "
-                "Use for: 'Top scorers', 'Most in-form players', 'Best value picks'"
+                "ownership %, transfers_in this GW, bonus points, xG, xG_per_90, xA, xA_per_90. "
+                "Use for: 'Top scorers', 'Most in-form players', 'Best value picks', 'Highest xG players'"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "metric": {
                         "type": "string",
-                        "enum": ["total_points", "form", "value", "selected_by", "transfers_in", "bonus"],
-                        "description": "Metric to rank by",
+                        "enum": ["total_points", "form", "value", "selected_by", "transfers_in", "bonus", "xG", "xG_per_90", "xA", "xA_per_90"],
+                        "description": "Metric to rank by (including xG/xA advanced stats)",
                         "default": "total_points"
                     },
                     "position": {
@@ -561,6 +587,10 @@ async def handle_call_tool(
         player = matching[0]
         team = teams[player['team']]
 
+        # Enhance with Understat xG/xA data
+        enhanced_players, _ = enhance_players_with_understat([player])
+        player = enhanced_players[0] if enhanced_players else player
+
         details = await make_fpl_request(f"element-summary/{player['id']}/")
         if "error" in details:
             return [types.TextContent(type="text", text=f"❌ Error: {details['error']}")]
@@ -579,6 +609,24 @@ async def handle_call_tool(
             f"Goals: {player.get('goals_scored', 0)} | Assists: {player.get('assists', 0)} | CS: {player.get('clean_sheets', 0)}",
             f"Bonus: {player.get('bonus', 0)}",
         ]
+
+        # Add Understat advanced stats if available
+        if player.get('xG', 0) > 0 or player.get('xA', 0) > 0:
+            results.append(f"\n⚡ ADVANCED STATS (Understat):")
+            results.append(f"xG (Expected Goals): {player.get('xG', 0):.2f}")
+            results.append(f"xA (Expected Assists): {player.get('xA', 0):.2f}")
+            results.append(f"xG per 90: {player.get('xG_per_90', 0):.2f}")
+            results.append(f"xA per 90: {player.get('xA_per_90', 0):.2f}")
+            results.append(f"Shots: {player.get('shots', 0)} | Key Passes: {player.get('key_passes', 0)}")
+
+            # Show over/underperformance
+            xg_overperf = player.get('xG_overperformance', 0)
+            if xg_overperf > 0.5:
+                results.append(f"📈 Overperforming xG by {xg_overperf:.2f} (scoring more than expected!)")
+            elif xg_overperf < -0.5:
+                results.append(f"📉 Underperforming xG by {abs(xg_overperf):.2f} (due for goals!)")
+            else:
+                results.append(f"Performing as expected (xG overperformance: {xg_overperf:+.2f})")
 
         # Recent performance
         history = details.get('history', [])
@@ -744,6 +792,10 @@ async def handle_call_tool(
         players = data.get('elements', [])
         teams = {team['id']: team for team in data.get('teams', [])}
 
+        # Enhance with Understat data for xG-based metrics
+        if metric in ['xG', 'xG_per_90', 'xA', 'xA_per_90']:
+            players, _ = enhance_players_with_understat(players)
+
         if position != 'all':
             position_id = {v: k for k, v in POSITIONS.items()}[position]
             players = [p for p in players if p['element_type'] == position_id]
@@ -768,6 +820,18 @@ async def handle_call_tool(
         elif metric == 'bonus':
             players.sort(key=lambda x: x.get('bonus', 0), reverse=True)
             metric_name = "Bonus Points"
+        elif metric == 'xG':
+            players.sort(key=lambda x: float(x.get('xG', 0)), reverse=True)
+            metric_name = "Expected Goals (xG)"
+        elif metric == 'xG_per_90':
+            players.sort(key=lambda x: float(x.get('xG_per_90', 0)), reverse=True)
+            metric_name = "xG per 90"
+        elif metric == 'xA':
+            players.sort(key=lambda x: float(x.get('xA', 0)), reverse=True)
+            metric_name = "Expected Assists (xA)"
+        elif metric == 'xA_per_90':
+            players.sort(key=lambda x: float(x.get('xA_per_90', 0)), reverse=True)
+            metric_name = "xA per 90"
 
         players = players[:limit]
 
@@ -787,12 +851,25 @@ async def handle_call_tool(
                 metric_val = f"{player.get('transfers_in_event', 0):,}"
             elif metric == 'bonus':
                 metric_val = f"{player.get('bonus', 0)}"
+            elif metric == 'xG':
+                metric_val = f"{player.get('xG', 0):.2f}"
+            elif metric == 'xG_per_90':
+                metric_val = f"{player.get('xG_per_90', 0):.2f}"
+            elif metric == 'xA':
+                metric_val = f"{player.get('xA', 0):.2f}"
+            elif metric == 'xA_per_90':
+                metric_val = f"{player.get('xA_per_90', 0):.2f}"
             else:
                 metric_val = f"{player['total_points']}"
 
+            # Add xG info to output if available (for non-xG metrics)
+            xg_info = ""
+            if metric not in ['xG', 'xG_per_90', 'xA', 'xA_per_90'] and player.get('xG', 0) > 0:
+                xg_info = f" | xG: {player.get('xG', 0):.1f}"
+
             results.append(
                 f"{i}. {player['web_name']} | {team['short_name']} | {POSITIONS[player['element_type']]} | "
-                f"{format_price(player['now_cost'])} | {metric_name}: {metric_val}"
+                f"{format_price(player['now_cost'])} | {metric_name}: {metric_val}{xg_info}"
             )
 
         return [types.TextContent(type="text", text="\n".join(results))]
