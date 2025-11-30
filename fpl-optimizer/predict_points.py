@@ -49,13 +49,16 @@ class FPLPointsPredictor:
             'clean_sheets', 'goals_conceded', 'bonus', 'bps', 'influence',
             'creativity', 'threat', 'ict_index', 'now_cost', 'selected_by_percent',
             'element_type', 'team',
-            # NEW: Understat features (8) - xG/xA advanced stats
-            'xG', 'xA', 'xG_per_90', 'xA_per_90',
-            'shots', 'shots_on_target', 'key_passes', 'xG_overperformance',
-            # NEW: Derived features (2)
-            'xG_xA_combined', 'finishing_quality'
+            # Understat core features (13) - xG/xA advanced stats
+            'xG', 'xA', 'npxG', 'xGChain', 'xGBuildup',
+            'xG_per_90', 'xA_per_90', 'npxG_per_90', 'xGChain_per_90', 'xGBuildup_per_90',
+            'shots', 'shots_on_target', 'key_passes',
+            # Understat performance metrics (3)
+            'xG_overperformance', 'xA_overperformance', 'npxG_overperformance',
+            # Derived features (4)
+            'xG_xA_combined', 'npxG_npxA_combined', 'finishing_quality', 'np_finishing_quality'
         ]
-        # Total: 27 features (17 FPL + 8 Understat + 2 derived)
+        # Total: 37 features (17 FPL + 16 Understat + 4 derived)
 
     def load_model(self):
         """Load trained model from disk"""
@@ -99,18 +102,29 @@ class FPLPointsPredictor:
                 'selected_by_percent': float(p.get('selected_by_percent', 0)),
                 'element_type': int(p.get('element_type', 1)),
                 'team': int(p.get('team', 1)),
-                # NEW: Understat features (with defaults if not present)
+                # Understat core features
                 'xG': float(p.get('xG', 0)),
                 'xA': float(p.get('xA', 0)),
+                'npxG': float(p.get('npxG', 0)),
+                'xGChain': float(p.get('xGChain', 0)),
+                'xGBuildup': float(p.get('xGBuildup', 0)),
                 'xG_per_90': float(p.get('xG_per_90', 0)),
                 'xA_per_90': float(p.get('xA_per_90', 0)),
+                'npxG_per_90': float(p.get('npxG_per_90', 0)),
+                'xGChain_per_90': float(p.get('xGChain_per_90', 0)),
+                'xGBuildup_per_90': float(p.get('xGBuildup_per_90', 0)),
                 'shots': int(p.get('shots', 0)),
                 'shots_on_target': int(p.get('shots_on_target', 0)),
                 'key_passes': int(p.get('key_passes', 0)),
+                # Performance metrics
                 'xG_overperformance': float(p.get('xG_overperformance', 0)),
-                # NEW: Derived features
+                'xA_overperformance': float(p.get('xA_overperformance', 0)),
+                'npxG_overperformance': float(p.get('npxG_overperformance', 0)),
+                # Derived features
                 'xG_xA_combined': float(p.get('xG_xA_combined', 0)),
-                'finishing_quality': float(p.get('finishing_quality', 1.0))
+                'npxG_npxA_combined': float(p.get('npxG_npxA_combined', 0)),
+                'finishing_quality': float(p.get('finishing_quality', 1.0)),
+                'np_finishing_quality': float(p.get('np_finishing_quality', 1.0))
             }
             features.append(row)
 

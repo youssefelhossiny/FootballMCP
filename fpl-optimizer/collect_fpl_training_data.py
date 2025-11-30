@@ -81,18 +81,29 @@ async def collect_fpl_training_data():
             'selected_by_percent': float(player.get('selected_by_percent', 0)),
             'element_type': int(player.get('element_type', 1)),
             'team': int(player.get('team', 1)),
-            # NEW: Understat features
+            # Understat core features
             'xG': float(player.get('xG', 0)),
             'xA': float(player.get('xA', 0)),
+            'npxG': float(player.get('npxG', 0)),
+            'xGChain': float(player.get('xGChain', 0)),
+            'xGBuildup': float(player.get('xGBuildup', 0)),
             'xG_per_90': float(player.get('xG_per_90', 0)),
             'xA_per_90': float(player.get('xA_per_90', 0)),
+            'npxG_per_90': float(player.get('npxG_per_90', 0)),
+            'xGChain_per_90': float(player.get('xGChain_per_90', 0)),
+            'xGBuildup_per_90': float(player.get('xGBuildup_per_90', 0)),
             'shots': int(player.get('shots', 0)),
             'shots_on_target': int(player.get('shots_on_target', 0)),
             'key_passes': int(player.get('key_passes', 0)),
+            # Performance metrics
             'xG_overperformance': float(player.get('xG_overperformance', 0)),
-            # NEW: Derived features
+            'xA_overperformance': float(player.get('xA_overperformance', 0)),
+            'npxG_overperformance': float(player.get('npxG_overperformance', 0)),
+            # Derived features
             'xG_xA_combined': float(player.get('xG_xA_combined', 0)),
+            'npxG_npxA_combined': float(player.get('npxG_npxA_combined', 0)),
             'finishing_quality': float(player.get('finishing_quality', 1.0)),
+            'np_finishing_quality': float(player.get('np_finishing_quality', 1.0)),
             # Target: Enhanced prediction using xG/xA
             'points_next_gw': predicted_next_gw
         }
@@ -134,9 +145,9 @@ if __name__ == "__main__":
     if df is not None:
         print("\n📊 Training Data Summary:")
         print(df[['form', 'total_points', 'minutes', 'xG', 'xA', 'points_next_gw']].describe())
-        print(f"\n📊 Feature count: {len(df.columns) - 1} features (27 total)")
+        print(f"\n📊 Feature count: {len(df.columns) - 1} features (37 total)")
         print(f"   - Original FPL: 17 features")
-        print(f"   - Understat: 8 features (xG, xA, shots, etc.)")
-        print(f"   - Derived: 2 features (xG_xA_combined, finishing_quality)")
+        print(f"   - Understat: 16 features (xG, npxG, xGChain, xGBuildup, per-90 stats, performance)")
+        print(f"   - Derived: 4 features (combined stats, finishing quality)")
         print(f"\n✅ Enhanced training data ready!")
         print(f"   Next step: python3 fpl-optimizer/predict_points.py")

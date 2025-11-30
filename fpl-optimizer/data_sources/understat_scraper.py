@@ -58,8 +58,13 @@ class UnderstatScraper:
 
                     xG = float(player.get('xG', 0))
                     xA = float(player.get('xA', 0))
+                    npxG = float(player.get('npxG', 0))  # Non-penalty xG
+                    xGChain = float(player.get('xGChain', 0))  # Total xG from attacks involved in
+                    xGBuildup = float(player.get('xGBuildup', 0))  # xG from buildup play
+
                     goals = int(player.get('goals', 0))
                     assists = int(player.get('assists', 0))
+                    npg = int(player.get('npg', 0))  # Non-penalty goals
                     shots = int(player.get('shots', 0))
 
                     processed.append({
@@ -68,17 +73,33 @@ class UnderstatScraper:
                         'position': player.get('position', ''),
                         'games': int(player.get('games', 0)),
                         'minutes': minutes,
+
+                        # Expected stats
                         'xG': xG,
                         'xA': xA,
+                        'npxG': npxG,
+                        'xGChain': xGChain,
+                        'xGBuildup': xGBuildup,
+
+                        # Per-90 stats
                         'xG_per_90': round(xG / games_played, 2),
                         'xA_per_90': round(xA / games_played, 2),
+                        'npxG_per_90': round(npxG / games_played, 2),
+                        'xGChain_per_90': round(xGChain / games_played, 2),
+                        'xGBuildup_per_90': round(xGBuildup / games_played, 2),
+
+                        # Actual stats
                         'goals': goals,
                         'assists': assists,
+                        'npg': npg,
                         'shots': shots,
                         'shots_on_target': int(player.get('shots_on_target', 0)),
                         'key_passes': int(player.get('key_passes', 0)),
+
+                        # Over/underperformance
                         'xG_overperformance': round(goals - xG, 2),
                         'xA_overperformance': round(assists - xA, 2),
+                        'npxG_overperformance': round(npg - npxG, 2),
                     })
 
                 print(f"✅ Fetched {len(processed)} players from Understat")

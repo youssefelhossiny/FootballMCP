@@ -1,114 +1,122 @@
-# ✅ FPL Optimizer - Phase 2b+ Complete
+# ✅ FPL Optimizer - Phase 3 Complete
 
-## 🎉 Final Match Rate: **57.5%** (434/755 players)
+## 🎉 Current Status
 
-### Journey:
-- **Initial:** 201/755 (26.6%)
-- **After 2025 season update:** 290/755 (38.4%)
-- **After manual matching:** 407/755 (53.91%)
-- **After apostrophe fix:** 423/755 (56.03%)
-- **After HTML entity fix:** 434/755 (**57.5%**) ✅
+**Match Rate:** 57.6% (435/755 players)
+**Features:** 37 (17 FPL + 16 Understat + 4 derived)
+**Model:** Random Forest (retrained with Phase 3 features)
 
-## Matching Breakdown
+---
+
+## 📊 Feature Breakdown
+
+### FPL Core Features (17)
+form, total_points, minutes, goals_scored, assists, clean_sheets, goals_conceded, bonus, bps, influence, creativity, threat, ict_index, now_cost, selected_by_percent, element_type, team
+
+### Understat Features (16)
+- **Expected Stats:** xG, xA, npxG, xGChain, xGBuildup
+- **Per-90 Stats:** xG_per_90, xA_per_90, npxG_per_90, xGChain_per_90, xGBuildup_per_90
+- **Actions:** shots, shots_on_target, key_passes
+- **Performance:** xG_overperformance, xA_overperformance, npxG_overperformance
+
+### Derived Features (4)
+xG_xA_combined, npxG_npxA_combined, finishing_quality, np_finishing_quality
+
+---
+
+## 🏆 Top 10 Most Important Features
+
+| Rank | Feature | Importance |
+|------|---------|------------|
+| 1 | form | 79.04% |
+| 2 | xG_per_90 | 7.89% |
+| 3 | xA_per_90 | 1.88% |
+| 4 | npxG_per_90 | 1.86% |
+| 5 | xG_xA_combined | 1.51% |
+| 6 | xGChain_per_90 | 1.29% |
+| 7 | npxG_npxA_combined | 1.10% |
+| 8 | npxG | 0.38% |
+| 9 | threat | 0.37% |
+| 10 | xGBuildup_per_90 | 0.33% |
+
+---
+
+## 🔧 Tools with xG/xA Integration
+
+| Tool | Features |
+|------|----------|
+| `get_all_players` | Shows xG/xA in listings |
+| `get_player_details` | Full xG breakdown (npxG, xGChain, xGBuildup) |
+| `get_top_performers` | Sort by xG, npxG, xA metrics |
+| `optimize_squad_lp` | Uses 37 features for optimization |
+| `evaluate_transfer` | xG comparison between players |
+| `suggest_transfers` | Uses xG for transfer scoring |
+| `suggest_captain` | Bonus for high xG players |
+
+---
+
+## 📁 Project Structure
 
 ```
-manual: 154 players          (Your manual mappings with HTML entities)
-exact: 208 players           (Direct name matches)
-fuzzy_full_normalized: 35    (Fuzzy on full name)
-fuzzy_web_normalized: 27     (Fuzzy on nickname)
-exact_normalized: 10         (Accent-insensitive)
-no_match: 321                (Using position defaults)
+Football-MCP/
+├── README.md                    # Main documentation
+├── FINAL_RESULTS.md            # This file
+├── PHASE_3_COMPLETE.md         # Phase 3 documentation
+├── .env                        # API keys
+├── fpl-optimizer/              # FPL MCP Server
+│   ├── Server.py               # Main MCP server (70KB)
+│   ├── enhanced_features.py    # xG/xA data collection
+│   ├── predict_points.py       # ML predictor (37 features)
+│   ├── enhanced_optimization.py
+│   ├── optimization.py
+│   ├── chips_strategy.py
+│   ├── collect_fpl_training_data.py
+│   ├── training_data.csv       # 1,945 samples
+│   ├── data_sources/
+│   │   ├── understat_scraper.py
+│   │   └── data_cache.py
+│   ├── player_mapping/
+│   │   ├── name_matcher.py
+│   │   └── manual_mappings.json  # 166 mappings
+│   └── cache/                  # Understat cache (6hr TTL)
+├── soccer-stats/               # Soccer Stats MCP Server
+│   ├── Server.py
+│   ├── train_model.py
+│   └── training_data.csv
+└── models/                     # Trained models
+    ├── points_model.pkl        # FPL predictor
+    ├── scaler.pkl
+    ├── features.txt            # 37 features
+    └── feature_importance.pkl
 ```
 
-## System Status
+---
 
-### ✅ What's Working:
-- **2025/26 season data** - Current Understat data (452 players)
-- **157 manual mappings** - All apostrophes fixed, 143 active matches
-- **Training data ready** - 1,945 samples with 27 features
-- **Model ready** - Can train with enhanced xG/xA features
+## 🚀 Quick Start
 
-### 📊 Training Data Stats:
-- **Active players:** 389 (90+ minutes)
-- **Training samples:** 1,945 (5x augmentation)
-- **Features:** 27 (17 FPL + 8 Understat + 2 derived)
-
-### 🎯 Match Rate by Importance:
-- **Premium attackers:** ~80-90% matched (where xG matters most)
-- **Active players (90+ min):** ~100% matched (all apostrophes fixed!)
-- **All players:** 56.03% matched
-- **Youth/bench (<90 min):** Position defaults (acceptable)
-
-## Files Structure
-
-### Core System:
-- `fpl-optimizer/enhanced_features.py` - Data collection with 2025 season
-- `fpl-optimizer/collect_fpl_training_data.py` - Training data generation
-- `fpl-optimizer/predict_points.py` - ML model (27 features)
-- `fpl-optimizer/player_mapping/manual_mappings.json` - 157 mappings (apostrophes fixed)
-
-### Helper Tools (Optional - Can Delete):
-- `find_unmatched_players.py` - Diagnostic tool
-- `apply_suggested_mappings.py` - Bulk mapping tool
-- `create_team_matching_list.py` - Team-by-team generator
-- `manual_match_top_players.py` - Manual matching helper
-- `suggested_mappings.json` - Auto-generated suggestions
-
-### Documentation (Can Archive):
-- `ACTIVE_PLAYERS_MATCHING.md` - Matching guide (now complete)
-- `TEAM_BY_TEAM_MATCHING.txt` - Full team rosters
-- `MANUAL_MATCHING_GUIDE.md` - Old guide (outdated)
-- `MATCHING_IMPROVEMENTS.md` - Progress log
-- `PHASE_2B_PLUS_COMPLETE.md` - Phase completion
-- `SEASON_2025_UPDATE.md` - Season update notes
-
-### Test Files (Can Delete):
-- `test_fpl_api.py`
-- `test_phase2.py`
-- `test_tools.py`
-- `test_llm_tools.py`
-- `manual_tool_test.py`
-
-## Next Steps
-
-### Option 1: Train Model (Recommended)
+### Start FPL Optimizer Server:
 ```bash
-python3 predict_points.py
+python3 fpl-optimizer/Server.py
 ```
 
-This will:
-- Train Random Forest with 27 features
-- Show feature importance (xG_per_90 should be #2)
-- Generate predictions with xG/xA insights
+### Test Prompts:
+- "Show me Haaland's xG stats"
+- "Top 10 forwards by xG per 90"
+- "Who is overperforming their xG?"
+- "Build optimal squad for next 5 gameweeks"
 
-### Option 2: Add More Mappings (Optional)
-- Current unmatched: 321 players (mostly youth/bench)
-- Can get to 60-65% by adding ~25 more mappings
-- Most active players already matched!
+---
 
-### Option 3: Clean Up
-Delete temporary files listed above to clean directory.
+## 📈 Phase History
 
-## Performance Expectations
-
-With 57.5% match rate and 27 features:
-
-**Expected Model Performance:**
-- Testing MAE: ~0.25-0.30 points (excellent)
-- xG_per_90 will be #2 most important feature
-- Better predictions for attackers vs baseline
-
-**Key Improvements:**
-- Identifies value picks (high xG_per_90, low price)
-- Spots overperformers (high goals vs xG)
-- Measures creative output (xA, key passes)
-- Rate stats normalized for playing time
+| Phase | Features | Match Rate | Key Addition |
+|-------|----------|------------|--------------|
+| Phase 1 | 17 | 26.6% | Basic FPL stats |
+| Phase 2 | 27 | 57.5% | xG, xA, shots, key passes |
+| Phase 3 | 37 | 57.6% | npxG, xGChain, xGBuildup |
 
 ---
 
 **Status:** ✅ **PRODUCTION READY**
-**Date:** 2025-01-24 (HTML entity fix: 2025-11-28)
+**Date:** 2025-11-30
 **Season:** 2025/26
-**Match Rate:** 57.5%
-**Features:** 27
-**Manual Mappings:** 166 (HTML entities handled)

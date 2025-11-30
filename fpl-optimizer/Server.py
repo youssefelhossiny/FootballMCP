@@ -483,6 +483,9 @@ async def handle_call_tool(
         players = data.get('elements', [])
         teams = {team['id']: team for team in data.get('teams', [])}
 
+        # Enhance players with xG/xA data
+        players, _ = enhance_players_with_understat(players)
+
         # Apply filters
         position = arguments.get('position', 'all')
         team_filter = arguments.get('team')
@@ -530,10 +533,15 @@ async def handle_call_tool(
             team = teams[player['team']]
             value = player['total_points'] / (player['now_cost'] / 10) if player['now_cost'] > 0 else 0
 
+            # Add xG info if available
+            xg_info = ""
+            if player.get('xG', 0) > 0 or player.get('xA', 0) > 0:
+                xg_info = f" | xG: {player.get('xG', 0):.1f} xA: {player.get('xA', 0):.1f}"
+
             results.append(
                 f"{i}. {player['web_name']} | {team['short_name']} | {POSITIONS[player['element_type']]} | "
                 f"Price: {format_price(player['now_cost'])} | Points: {player['total_points']} | "
-                f"Form: {player.get('form', 0)} | Value: {value:.1f}pts/£"
+                f"Form: {player.get('form', 0)} | Value: {value:.1f}pts/£{xg_info}"
             )
 
         return [types.TextContent(type="text", text="\n".join(results))]
@@ -613,20 +621,48 @@ async def handle_call_tool(
         # Add Understat advanced stats if available
         if player.get('xG', 0) > 0 or player.get('xA', 0) > 0:
             results.append(f"\n⚡ ADVANCED STATS (Understat):")
+
+            # Expected stats (total)
             results.append(f"xG (Expected Goals): {player.get('xG', 0):.2f}")
             results.append(f"xA (Expected Assists): {player.get('xA', 0):.2f}")
-            results.append(f"xG per 90: {player.get('xG_per_90', 0):.2f}")
-            results.append(f"xA per 90: {player.get('xA_per_90', 0):.2f}")
+
+            # Non-penalty stats (if available)
+            if player.get('npxG', 0) > 0:
+                results.append(f"npxG (Non-Penalty xG): {player.get('npxG', 0):.2f}")
+
+            # Per-90 stats
+            results.append(f"\nPer-90 Stats:")
+            results.append(f"xG per 90: {player.get('xG_per_90', 0):.2f} | xA per 90: {player.get('xA_per_90', 0):.2f}")
+            if player.get('npxG_per_90', 0) > 0:
+                results.append(f"npxG per 90: {player.get('npxG_per_90', 0):.2f}")
+
+            # Involvement stats
+            if player.get('xGChain', 0) > 0 or player.get('xGBuildup', 0) > 0:
+                results.append(f"\nAttack Involvement:")
+                results.append(f"xG Chain: {player.get('xGChain', 0):.2f} ({player.get('xGChain_per_90', 0):.2f} per 90)")
+                results.append(f"xG Buildup: {player.get('xGBuildup', 0):.2f} ({player.get('xGBuildup_per_90', 0):.2f} per 90)")
+
+            # Shooting and passing
+            results.append(f"\nShooting & Passing:")
             results.append(f"Shots: {player.get('shots', 0)} | Key Passes: {player.get('key_passes', 0)}")
+            if player.get('shots_on_target', 0) > 0:
+                shot_accuracy = (player.get('shots_on_target', 0) / player.get('shots', 1)) * 100
+                results.append(f"Shot Accuracy: {shot_accuracy:.1f}%")
 
             # Show over/underperformance
+            results.append(f"\nPerformance vs Expected:")
             xg_overperf = player.get('xG_overperformance', 0)
             if xg_overperf > 0.5:
                 results.append(f"📈 Overperforming xG by {xg_overperf:.2f} (scoring more than expected!)")
             elif xg_overperf < -0.5:
                 results.append(f"📉 Underperforming xG by {abs(xg_overperf):.2f} (due for goals!)")
             else:
-                results.append(f"Performing as expected (xG overperformance: {xg_overperf:+.2f})")
+                results.append(f"xG overperformance: {xg_overperf:+.2f}")
+
+            # Non-penalty overperformance (if meaningful)
+            npxg_overperf = player.get('npxG_overperformance', 0)
+            if abs(npxg_overperf) > 0.3:
+                results.append(f"npxG overperformance: {npxg_overperf:+.2f}")
 
         # Recent performance
         history = details.get('history', [])
@@ -792,9 +828,8 @@ async def handle_call_tool(
         players = data.get('elements', [])
         teams = {team['id']: team for team in data.get('teams', [])}
 
-        # Enhance with Understat data for xG-based metrics
-        if metric in ['xG', 'xG_per_90', 'xA', 'xA_per_90']:
-            players, _ = enhance_players_with_understat(players)
+        # Enhance ALL players with Understat data (for xG info in all metrics)
+        players, _ = enhance_players_with_understat(players)
 
         if position != 'all':
             position_id = {v: k for k, v in POSITIONS.items()}[position]
@@ -896,6 +931,10 @@ async def handle_call_tool(
             teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
             events = bootstrap.get('events', [])
             current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            # Enhance players with xG/xA data for better predictions
+            players, match_stats = enhance_players_with_understat(players)
+            logger.info(f"📊 Enhanced {len(players)} players with Understat data ({match_stats.get('match_rate', 0):.1f}% matched)")
 
             budget = arguments.get('budget', 100.0)
             optimize_for = arguments.get('optimize_for', 'fixtures')
@@ -1050,8 +1089,12 @@ async def handle_call_tool(
             if "error" in bootstrap:
                 return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
 
-            players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+            players_list = bootstrap.get('elements', [])
             teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
+
+            # Enhance players with xG/xA data for better transfer evaluation
+            enhanced_players, _ = enhance_players_with_understat(players_list)
+            players_data = {p['id']: p for p in enhanced_players}
 
             player_out_id = arguments.get('player_out_id')
             player_in_id = arguments.get('player_in_id')
@@ -1079,6 +1122,12 @@ async def handle_call_tool(
             out_team = teams_data[player_out['team']]
             in_team = teams_data[player_in['team']]
 
+            # Get xG comparison
+            out_xg = player_out.get('xG', 0)
+            in_xg = player_in.get('xG', 0)
+            out_xg90 = player_out.get('xG_per_90', 0)
+            in_xg90 = player_in.get('xG_per_90', 0)
+
             results = [
                 f"TRANSFER EVALUATION",
                 f"OUT: {player_out['web_name']} ({out_team['short_name']}) - £{player_out['now_cost'] / 10}m",
@@ -1086,12 +1135,26 @@ async def handle_call_tool(
                 f"\nPREDICTIONS:",
                 f"  {player_out['web_name']}: {out_pred:.1f} pts/gw",
                 f"  {player_in['web_name']}: {in_pred:.1f} pts/gw",
+            ]
+
+            # Add xG comparison if available
+            if in_xg > 0 or out_xg > 0:
+                results.append(f"\n⚡ ADVANCED STATS (xG/xA):")
+                results.append(f"  {player_out['web_name']}: xG={out_xg:.2f} (xG/90: {out_xg90:.2f})")
+                results.append(f"  {player_in['web_name']}: xG={in_xg:.2f} (xG/90: {in_xg90:.2f})")
+                xg_diff = in_xg90 - out_xg90
+                if xg_diff > 0.1:
+                    results.append(f"  📈 {player_in['web_name']} has {xg_diff:.2f} higher xG per 90!")
+                elif xg_diff < -0.1:
+                    results.append(f"  📉 {player_out['web_name']} has {abs(xg_diff):.2f} higher xG per 90")
+
+            results.extend([
                 f"\nCOST ANALYSIS:",
                 f"  Price difference: £{cost_diff:.1f}m",
                 f"  Hit cost: {hit_cost} pts",
                 f"  Expected gain: {expected_gain:.1f} pts",
                 f"\nRECOMMENDATION:",
-            ]
+            ])
 
             if expected_gain > 5:
                 results.append("🟢 DO IT! Significant points gain expected")
@@ -1175,10 +1238,14 @@ async def handle_call_tool(
             if "error" in bootstrap:
                 return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
 
-            players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+            players_list = bootstrap.get('elements', [])
             teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
             events = bootstrap.get('events', [])
             current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+            # Enhance players with xG/xA data for better captain predictions
+            enhanced_players, _ = enhance_players_with_understat(players_list)
+            players_data = {p['id']: p for p in enhanced_players}
 
             team_id = arguments.get('team_id')
             if not team_id:
@@ -1198,13 +1265,20 @@ async def handle_call_tool(
             # Score captaincy options
             captain_scores = {}
             for player in squad:
-                # Predict points with 2x multiplier
+                # Predict points with 2x multiplier (using enhanced xG data)
                 base_pred = predictor.predict_player_points(player, {}, {})
                 captaincy_score = base_pred * 2
 
                 # Bonus for premium players
                 if player['now_cost'] >= 10.0:
                     captaincy_score += 1
+
+                # Bonus for high xG players (reliable scorers)
+                xg_per_90 = player.get('xG_per_90', 0)
+                if xg_per_90 > 0.5:  # Elite xG
+                    captaincy_score += 1
+                elif xg_per_90 > 0.3:  # Good xG
+                    captaincy_score += 0.5
 
                 captain_scores[player['id']] = (player, captaincy_score)
 
@@ -1220,9 +1294,12 @@ async def handle_call_tool(
                 team = teams_data[player['team']]
                 base_pts = score / 2
                 captain_pts = score
+                xg_info = ""
+                if player.get('xG_per_90', 0) > 0:
+                    xg_info = f" | xG/90: {player.get('xG_per_90', 0):.2f}"
                 results.append(
                     f"{rank}. {player['web_name']} ({team['short_name']}) "
-                    f"- Base: {base_pts:.1f}pts, Captain: {captain_pts:.1f}pts"
+                    f"- Base: {base_pts:.1f}pts, Captain: {captain_pts:.1f}pts{xg_info}"
                 )
 
             return [types.TextContent(type="text", text="\n".join(results))]
@@ -1349,10 +1426,14 @@ async def handle_call_tool(
         if "error" in bootstrap:
             return [types.TextContent(type="text", text=f"❌ Error: {bootstrap['error']}")]
 
-        players_data = {p['id']: p for p in bootstrap.get('elements', [])}
+        players_list = bootstrap.get('elements', [])
         teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
         events = bootstrap.get('events', [])
         current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
+
+        # Enhance players with xG/xA data for better transfer suggestions
+        enhanced_players, _ = enhance_players_with_understat(players_list)
+        players_data = {p['id']: p for p in enhanced_players}
 
         # Get user's team
         team_data = await make_fpl_request(f"entry/{team_id}/")
@@ -1397,6 +1478,19 @@ async def handle_call_tool(
             if player.get('cost_change_event', 0) < 0:
                 transfer_out_score += 20
                 reasons_out.append("Price falling")
+
+            # Low xG underperformance (could regress positively, but risky)
+            xg_overperf = player.get('xG_overperformance', 0)
+            if xg_overperf > 3.0:  # Massively overperforming xG - regression risk
+                transfer_out_score += 15
+                reasons_out.append(f"High regression risk (xG overperf: +{xg_overperf:.1f})")
+
+            # Low underlying stats
+            xg_per_90 = player.get('xG_per_90', 0)
+            position = player.get('element_type', 3)
+            if position in [3, 4] and xg_per_90 < 0.15 and form < 4.0:  # Attackers with bad xG
+                transfer_out_score += 20
+                reasons_out.append(f"Poor xG ({xg_per_90:.2f} per 90)")
 
             if transfer_out_score > 30:  # Threshold for consideration
                 transfer_candidates.append({

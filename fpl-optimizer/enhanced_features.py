@@ -78,19 +78,33 @@ class EnhancedDataCollector:
         enhanced = dict(fpl_player)
 
         if understat_match:
-            # Add Understat features
+            # Add core Understat features
             enhanced['xG'] = understat_match.get('xG', 0.0)
             enhanced['xA'] = understat_match.get('xA', 0.0)
+            enhanced['npxG'] = understat_match.get('npxG', 0.0)
+            enhanced['xGChain'] = understat_match.get('xGChain', 0.0)
+            enhanced['xGBuildup'] = understat_match.get('xGBuildup', 0.0)
+
+            # Per-90 stats
             enhanced['xG_per_90'] = understat_match.get('xG_per_90', 0.0)
             enhanced['xA_per_90'] = understat_match.get('xA_per_90', 0.0)
+            enhanced['npxG_per_90'] = understat_match.get('npxG_per_90', 0.0)
+            enhanced['xGChain_per_90'] = understat_match.get('xGChain_per_90', 0.0)
+            enhanced['xGBuildup_per_90'] = understat_match.get('xGBuildup_per_90', 0.0)
+
+            # Shooting and passing
             enhanced['shots'] = understat_match.get('shots', 0)
             enhanced['shots_on_target'] = understat_match.get('shots_on_target', 0)
             enhanced['key_passes'] = understat_match.get('key_passes', 0)
+
+            # Over/underperformance
             enhanced['xG_overperformance'] = understat_match.get('xG_overperformance', 0.0)
             enhanced['xA_overperformance'] = understat_match.get('xA_overperformance', 0.0)
+            enhanced['npxG_overperformance'] = understat_match.get('npxG_overperformance', 0.0)
 
             # Derived features
             enhanced['xG_xA_combined'] = enhanced['xG'] + enhanced['xA']
+            enhanced['npxG_npxA_combined'] = enhanced['npxG'] + enhanced['xA']  # Non-penalty threat
 
             # Finishing quality (goals / xG, with safety checks)
             if enhanced['xG'] > 0:
@@ -99,6 +113,13 @@ class EnhancedDataCollector:
             else:
                 enhanced['finishing_quality'] = 1.0  # Neutral
 
+            # Non-penalty finishing quality
+            if enhanced['npxG'] > 0:
+                npg = understat_match.get('npg', 0)
+                enhanced['np_finishing_quality'] = round(npg / enhanced['npxG'], 2)
+            else:
+                enhanced['np_finishing_quality'] = 1.0
+
         else:
             # No match - use position-based defaults
             position = fpl_player.get('element_type', 3)
@@ -106,19 +127,27 @@ class EnhancedDataCollector:
             # Position defaults (conservative estimates)
             defaults = {
                 1: {  # Goalkeepers
-                    'xG': 0.0, 'xA': 0.0, 'xG_per_90': 0.0, 'xA_per_90': 0.0,
+                    'xG': 0.0, 'xA': 0.0, 'npxG': 0.0, 'xGChain': 0.5, 'xGBuildup': 0.3,
+                    'xG_per_90': 0.0, 'xA_per_90': 0.0, 'npxG_per_90': 0.0,
+                    'xGChain_per_90': 0.05, 'xGBuildup_per_90': 0.03,
                     'shots': 0, 'shots_on_target': 0, 'key_passes': 0
                 },
                 2: {  # Defenders
-                    'xG': 0.5, 'xA': 0.3, 'xG_per_90': 0.08, 'xA_per_90': 0.05,
+                    'xG': 0.5, 'xA': 0.3, 'npxG': 0.4, 'xGChain': 2.0, 'xGBuildup': 1.5,
+                    'xG_per_90': 0.08, 'xA_per_90': 0.05, 'npxG_per_90': 0.06,
+                    'xGChain_per_90': 0.25, 'xGBuildup_per_90': 0.18,
                     'shots': 5, 'shots_on_target': 2, 'key_passes': 3
                 },
                 3: {  # Midfielders
-                    'xG': 1.5, 'xA': 1.0, 'xG_per_90': 0.15, 'xA_per_90': 0.10,
+                    'xG': 1.5, 'xA': 1.0, 'npxG': 1.2, 'xGChain': 5.0, 'xGBuildup': 3.5,
+                    'xG_per_90': 0.15, 'xA_per_90': 0.10, 'npxG_per_90': 0.12,
+                    'xGChain_per_90': 0.50, 'xGBuildup_per_90': 0.35,
                     'shots': 15, 'shots_on_target': 6, 'key_passes': 10
                 },
                 4: {  # Forwards
-                    'xG': 3.0, 'xA': 0.8, 'xG_per_90': 0.35, 'xA_per_90': 0.08,
+                    'xG': 3.0, 'xA': 0.8, 'npxG': 2.5, 'xGChain': 6.0, 'xGBuildup': 2.0,
+                    'xG_per_90': 0.35, 'xA_per_90': 0.08, 'npxG_per_90': 0.30,
+                    'xGChain_per_90': 0.60, 'xGBuildup_per_90': 0.20,
                     'shots': 25, 'shots_on_target': 12, 'key_passes': 5
                 }
             }
@@ -130,8 +159,11 @@ class EnhancedDataCollector:
 
             enhanced['xG_overperformance'] = 0.0
             enhanced['xA_overperformance'] = 0.0
+            enhanced['npxG_overperformance'] = 0.0
             enhanced['xG_xA_combined'] = enhanced['xG'] + enhanced['xA']
+            enhanced['npxG_npxA_combined'] = enhanced['npxG'] + enhanced['xA']
             enhanced['finishing_quality'] = 1.0
+            enhanced['np_finishing_quality'] = 1.0
 
         return enhanced
 
