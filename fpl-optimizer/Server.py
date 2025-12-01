@@ -15,9 +15,61 @@ Phase 2 Tools (🚧 In Progress):
 7. suggest_transfers - Transfer recommendations (NEW - requires user input for FT/chips)
 """
 
-import os
-import asyncio
+# CRITICAL: Redirect stdout to stderr and configure logging BEFORE any imports
+# MCP protocol requires stdout to be pure JSON - any print statements corrupt it
+import sys
 import logging
+import os
+import io
+
+# Suppress soccerdata's rich console output by setting environment variable
+# This MUST be done BEFORE any imports that use soccerdata
+os.environ['SOCCERDATA_LOGLEVEL'] = 'CRITICAL'
+
+# Save original stdout/stderr
+_original_stdout = sys.stdout
+_original_stderr = sys.stderr
+
+# Redirect stdout to stderr so print() goes to stderr (not stdout which MCP uses)
+sys.stdout = sys.stderr
+
+# Configure logging BEFORE importing anything else
+logging.basicConfig(
+    level=logging.CRITICAL,
+    format='%(levelname)s:%(name)s: %(message)s',
+    stream=sys.stderr,
+    force=True
+)
+
+# Disable ALL loggers aggressively
+logging.disable(logging.WARNING)
+
+# Pre-suppress all loggers
+for logger_name in ['httpx', 'httpcore', 'soccerdata', 'mcp', 'predict_points',
+                     'enhanced_optimization', 'enhanced_features', '__main__',
+                     'mcp.server', 'mcp.server.lowlevel', 'mcp.server.lowlevel.server',
+                     'soccerdata._config', 'rich', 'rich.console', 'rich.logging']:
+    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+    logging.getLogger(logger_name).disabled = True
+
+# Patch rich.logging.RichHandler BEFORE soccerdata imports it
+# This prevents the INFO messages from appearing
+class _SilentHandler(logging.Handler):
+    def __init__(self, *args, **kwargs):
+        super().__init__()  # Ignore all RichHandler-specific args
+
+    def emit(self, record):
+        pass  # Silently drop all log records
+
+# Pre-import rich and patch it
+try:
+    import rich.logging
+    rich.logging.RichHandler = _SilentHandler
+except ImportError:
+    pass
+
+# Now import everything else
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import httpx
@@ -32,11 +84,7 @@ from chips_strategy import ChipsStrategyAnalyzer
 from enhanced_features import EnhancedDataCollector
 from pathlib import Path
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s:%(name)s: %(message)s'
-)
+# Get our logger (already configured above)
 logger = logging.getLogger(__name__)
 
 # FPL API Configuration
@@ -256,18 +304,20 @@ async def handle_list_tools() -> list[types.Tool]:
             name="get_top_performers",
             description=(
                 "Get top performing players ranked by chosen metric. "
-                "Returns ranked list of players with key stats including xG/xA data. "
+                "Returns ranked list of players with key stats including xG/xA and FBRef data. "
                 "Metrics: total_points, form (last 5 GW avg), value (pts/£), "
-                "ownership %, transfers_in this GW, bonus points, xG, xG_per_90, xA, xA_per_90. "
-                "Use for: 'Top scorers', 'Most in-form players', 'Best value picks', 'Highest xG players'"
+                "ownership %, transfers_in this GW, bonus points, xG, xG_per_90, xA, xA_per_90, "
+                "def_contributions_per_90 (for FPL defensive points), sca_per_90 (shot-creating actions). "
+                "Use for: 'Top scorers', 'Most in-form players', 'Best value picks', 'Highest xG players', "
+                "'Top defenders by defensive contributions', 'Best playmakers by SCA'"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "metric": {
                         "type": "string",
-                        "enum": ["total_points", "form", "value", "selected_by", "transfers_in", "bonus", "xG", "xG_per_90", "xA", "xA_per_90"],
-                        "description": "Metric to rank by (including xG/xA advanced stats)",
+                        "enum": ["total_points", "form", "value", "selected_by", "transfers_in", "bonus", "xG", "xG_per_90", "xA", "xA_per_90", "def_contributions_per_90", "sca_per_90", "gca_per_90", "progressive_passes_per_90"],
+                        "description": "Metric to rank by (including xG/xA and FBRef advanced stats)",
                         "default": "total_points"
                     },
                     "position": {
@@ -538,10 +588,16 @@ async def handle_call_tool(
             if player.get('xG', 0) > 0 or player.get('xA', 0) > 0:
                 xg_info = f" | xG: {player.get('xG', 0):.1f} xA: {player.get('xA', 0):.1f}"
 
+            # Add defensive info for defenders
+            def_info = ""
+            if player['element_type'] == 2 and player.get('def_contributions_per_90', 0) > 0:
+                def_per_90 = player.get('def_contributions_per_90', 0)
+                def_info = f" | Def/90: {def_per_90:.1f}"
+
             results.append(
                 f"{i}. {player['web_name']} | {team['short_name']} | {POSITIONS[player['element_type']]} | "
                 f"Price: {format_price(player['now_cost'])} | Points: {player['total_points']} | "
-                f"Form: {player.get('form', 0)} | Value: {value:.1f}pts/£{xg_info}"
+                f"Form: {player.get('form', 0)} | Value: {value:.1f}pts/£{xg_info}{def_info}"
             )
 
         return [types.TextContent(type="text", text="\n".join(results))]
@@ -663,6 +719,71 @@ async def handle_call_tool(
             npxg_overperf = player.get('npxG_overperformance', 0)
             if abs(npxg_overperf) > 0.3:
                 results.append(f"npxG overperformance: {npxg_overperf:+.2f}")
+
+        # Add FBRef defensive/progressive stats if available (Phase 4.1)
+        def_contrib = player.get('def_contributions', 0)
+        position = player.get('element_type', 3)
+        pos_name = POSITIONS.get(position, 'UNK')
+
+        if def_contrib > 0 or player.get('tackles', 0) > 0 or player.get('fpl_dc_points', 0) > 0:
+            results.append(f"\n🛡️ DEFENSIVE CONTRIBUTION ({pos_name}):")
+
+            # === ACTUAL FPL DC STATS (this season) ===
+            fpl_dc_points = player.get('fpl_dc_points', 0)
+            fpl_cbi = player.get('fpl_cbi', 0)
+            fpl_tackles = player.get('fpl_tackles', 0)
+            fpl_recoveries = player.get('fpl_recoveries', 0)
+
+            results.append(f"\n📈 ACTUAL (FPL this season):")
+            results.append(f"DC Points Earned: {fpl_dc_points} pts")
+            results.append(f"CBI: {fpl_cbi} | Tackles: {fpl_tackles} | Recoveries: {fpl_recoveries}")
+
+            # === PREDICTED DC (FBRef) ===
+            results.append(f"\n🔮 PREDICTED (FBRef per 90):")
+            results.append(f"Tackles: {player.get('tackles', 0)} (Won: {player.get('tackles_won', 0)}, {player.get('tackle_pct', 0):.0f}%)")
+            results.append(f"Interceptions: {player.get('interceptions', 0)} | Blocks: {player.get('blocks', 0)}")
+            results.append(f"Clearances: {player.get('clearances', 0)} | Recoveries: {player.get('fbref_recoveries', 0)}")
+
+            # Show predicted DC calculation
+            base_dc = player.get('def_contributions_per_90', 0)
+            fbref_rec_90 = player.get('fbref_recoveries_per_90', 0)
+            predicted_dc = player.get('predicted_dc_per_90', base_dc)
+
+            threshold = 10 if position == 2 else 12
+            threshold_name = "DEF: 10" if position == 2 else "MID/FWD: 12"
+
+            if position in [3, 4]:  # MID/FWD - show recoveries in calculation
+                results.append(f"\nBase DC/90: {base_dc:.1f} + Recoveries/90: {fbref_rec_90:.1f} = {predicted_dc:.1f}")
+            else:
+                results.append(f"\nDC/90: {predicted_dc:.1f} (Threshold: {threshold_name})")
+
+            prob = player.get('def_contribution_prob', 0)
+            expected_pts = player.get('expected_def_points', 0)
+
+            if predicted_dc >= threshold:
+                results.append(f"🎯 {prob*100:.0f}% chance of 2pt bonus per match!")
+                results.append(f"Expected DC pts/match: {expected_pts:.2f}")
+            elif predicted_dc >= threshold * 0.8:
+                results.append(f"⚠️ {prob*100:.0f}% chance - close to threshold ({threshold})")
+            else:
+                results.append(f"📉 Low DC probability ({prob*100:.0f}%) - below threshold")
+
+        # Add progressive stats if available
+        prog_passes = player.get('progressive_passes', 0)
+        if prog_passes > 0:
+            results.append(f"\n📈 PROGRESSIVE STATS (FBRef):")
+            results.append(f"Progressive Passes: {prog_passes} ({player.get('progressive_passes_per_90', 0):.1f} per 90)")
+            results.append(f"Progressive Carries: {player.get('progressive_carries', 0)} ({player.get('progressive_carries_per_90', 0):.1f} per 90)")
+            results.append(f"Progressive Receptions: {player.get('progressive_receptions', 0)} ({player.get('progressive_receptions_per_90', 0):.1f} per 90)")
+
+        # Add creation stats if available
+        sca = player.get('sca', 0)
+        gca = player.get('gca', 0)
+        if sca > 0 or gca > 0:
+            results.append(f"\n✨ CREATION STATS (FBRef):")
+            results.append(f"Shot-Creating Actions: {sca} ({player.get('sca_per_90', 0):.1f} per 90)")
+            results.append(f"Goal-Creating Actions: {gca} ({player.get('gca_per_90', 0):.1f} per 90)")
+            results.append(f"Touches in Attacking 3rd: {player.get('touches_att_3rd', 0)}")
 
         # Recent performance
         history = details.get('history', [])
@@ -867,6 +988,18 @@ async def handle_call_tool(
         elif metric == 'xA_per_90':
             players.sort(key=lambda x: float(x.get('xA_per_90', 0)), reverse=True)
             metric_name = "xA per 90"
+        elif metric == 'def_contributions_per_90':
+            players.sort(key=lambda x: float(x.get('def_contributions_per_90', 0)), reverse=True)
+            metric_name = "Def Contributions/90"
+        elif metric == 'sca_per_90':
+            players.sort(key=lambda x: float(x.get('sca_per_90', 0)), reverse=True)
+            metric_name = "Shot-Creating Actions/90"
+        elif metric == 'gca_per_90':
+            players.sort(key=lambda x: float(x.get('gca_per_90', 0)), reverse=True)
+            metric_name = "Goal-Creating Actions/90"
+        elif metric == 'progressive_passes_per_90':
+            players.sort(key=lambda x: float(x.get('progressive_passes_per_90', 0)), reverse=True)
+            metric_name = "Progressive Passes/90"
 
         players = players[:limit]
 
@@ -894,6 +1027,14 @@ async def handle_call_tool(
                 metric_val = f"{player.get('xA', 0):.2f}"
             elif metric == 'xA_per_90':
                 metric_val = f"{player.get('xA_per_90', 0):.2f}"
+            elif metric == 'def_contributions_per_90':
+                metric_val = f"{player.get('def_contributions_per_90', 0):.1f}"
+            elif metric == 'sca_per_90':
+                metric_val = f"{player.get('sca_per_90', 0):.2f}"
+            elif metric == 'gca_per_90':
+                metric_val = f"{player.get('gca_per_90', 0):.2f}"
+            elif metric == 'progressive_passes_per_90':
+                metric_val = f"{player.get('progressive_passes_per_90', 0):.1f}"
             else:
                 metric_val = f"{player['total_points']}"
 
@@ -1148,6 +1289,31 @@ async def handle_call_tool(
                 elif xg_diff < -0.1:
                     results.append(f"  📉 {player_out['web_name']} has {abs(xg_diff):.2f} higher xG per 90")
 
+            # Add FBRef defensive comparison (Phase 4)
+            out_def = player_out.get('def_contributions_per_90', 0)
+            in_def = player_in.get('def_contributions_per_90', 0)
+            if out_def > 0 or in_def > 0:
+                results.append(f"\n🛡️ DEFENSIVE STATS (FBRef):")
+                results.append(f"  {player_out['web_name']}: {out_def:.1f} def contributions/90")
+                results.append(f"  {player_in['web_name']}: {in_def:.1f} def contributions/90")
+
+                # Check likelihood of FPL defensive points
+                out_prob = player_out.get('def_contribution_prob', 0)
+                in_prob = player_in.get('def_contribution_prob', 0)
+
+                if in_prob > out_prob + 0.1:
+                    results.append(f"  📈 {player_in['web_name']} more likely to earn 2pt defensive bonus ({in_prob*100:.0f}% vs {out_prob*100:.0f}%)")
+                elif out_prob > in_prob + 0.1:
+                    results.append(f"  📉 {player_out['web_name']} more likely to earn 2pt defensive bonus ({out_prob*100:.0f}% vs {in_prob*100:.0f}%)")
+
+            # Add creation stats comparison (Phase 4)
+            out_sca = player_out.get('sca_per_90', 0)
+            in_sca = player_in.get('sca_per_90', 0)
+            if out_sca > 0 or in_sca > 0:
+                results.append(f"\n✨ CREATION STATS (FBRef):")
+                results.append(f"  {player_out['web_name']}: {out_sca:.2f} SCA/90, {player_out.get('gca_per_90', 0):.2f} GCA/90")
+                results.append(f"  {player_in['web_name']}: {in_sca:.2f} SCA/90, {player_in.get('gca_per_90', 0):.2f} GCA/90")
+
             results.extend([
                 f"\nCOST ANALYSIS:",
                 f"  Price difference: £{cost_diff:.1f}m",
@@ -1278,6 +1444,12 @@ async def handle_call_tool(
                 if xg_per_90 > 0.5:  # Elite xG
                     captaincy_score += 1
                 elif xg_per_90 > 0.3:  # Good xG
+                    captaincy_score += 0.5
+
+                # Bonus for defenders with high defensive contribution probability
+                position = player.get('element_type', 3)
+                def_contrib_prob = player.get('def_contribution_prob', 0)
+                if position == 2 and def_contrib_prob >= 0.5:  # Defender likely to get 2pt bonus
                     captaincy_score += 0.5
 
                 captain_scores[player['id']] = (player, captaincy_score)
@@ -1492,6 +1664,12 @@ async def handle_call_tool(
                 transfer_out_score += 20
                 reasons_out.append(f"Poor xG ({xg_per_90:.2f} per 90)")
 
+            # Low defensive contributions for defenders (new FPL 2025/26 scoring)
+            def_per_90 = player.get('def_contributions_per_90', 0)
+            if position == 2 and def_per_90 < 6.0 and def_per_90 > 0:  # Defender with low def contributions
+                transfer_out_score += 15
+                reasons_out.append(f"Low defensive contributions ({def_per_90:.1f} per 90, need 10)")
+
             if transfer_out_score > 30:  # Threshold for consideration
                 transfer_candidates.append({
                     'player': player,
@@ -1590,6 +1768,11 @@ async def handle_call_tool(
 
 async def main():
     """Run the FPL MCP server"""
+    # CRITICAL: Restore original stdout for MCP protocol communication
+    # MCP needs stdout for JSON-RPC, but we redirected it to stderr during import
+    # to prevent print() statements from corrupting the protocol
+    sys.stdout = _original_stdout
+
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,

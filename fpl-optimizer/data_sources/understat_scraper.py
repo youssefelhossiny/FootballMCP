@@ -30,7 +30,7 @@ class UnderstatScraper:
 
         self.last_request_time = time.time()
 
-    def fetch_epl_players(self, season: str = "2024") -> List[Dict]:
+    def fetch_epl_players(self, season: str = "2025") -> List[Dict]:
         """
         Get all EPL players with xG/xA stats from Understat
 
@@ -191,7 +191,7 @@ if __name__ == "__main__":
 
     # If no cache or expired, fetch fresh data
     if players is None:
-        players = scraper.fetch_epl_players(season="2024")
+        players = scraper.fetch_epl_players(season="2025")
         if players:
             scraper.save_to_cache(players)
 

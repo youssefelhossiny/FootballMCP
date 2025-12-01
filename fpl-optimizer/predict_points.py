@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 FPL Linear Programming Squad Optimizer
-Phase 2b: True optimal squad selection using PuLP
+Phase 4.1: Understat xG/xA + FBRef defensive/progressive stats + Recoveries
+
+Features:
+- 17 FPL base features
+- 16 Understat features (xG, xA, npxG, xGChain, xGBuildup + per-90s + overperformance)
+- 4 derived Understat features
+- 21 FBRef features (defensive, progressive, creation)
+- 3 new FBRef misc features (recoveries, predicted DC)
+Total: 61 features
 """
 
 from pulp import *
@@ -17,12 +25,9 @@ import joblib
 import os
 from pathlib import Path
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s:%(name)s: %(message)s'
-)
+# Setup logging - only configure if running standalone (not when imported by MCP server)
 logger = logging.getLogger(__name__)
+# Don't set level here - let the importer control it
 
 
 class FPLPointsPredictor:
@@ -55,10 +60,24 @@ class FPLPointsPredictor:
             'shots', 'shots_on_target', 'key_passes',
             # Understat performance metrics (3)
             'xG_overperformance', 'xA_overperformance', 'npxG_overperformance',
-            # Derived features (4)
-            'xG_xA_combined', 'npxG_npxA_combined', 'finishing_quality', 'np_finishing_quality'
+            # Derived Understat features (4)
+            'xG_xA_combined', 'npxG_npxA_combined', 'finishing_quality', 'np_finishing_quality',
+            # FBRef Defensive features (10) - Critical for FPL defensive contribution points
+            'tackles', 'tackles_won', 'tackle_pct', 'interceptions', 'tackles_plus_int',
+            'blocks', 'clearances', 'errors', 'def_contributions', 'def_contributions_per_90',
+            # FBRef Derived defensive features (2)
+            'def_contribution_prob', 'expected_def_points',
+            # FBRef Progressive features (6)
+            'progressive_passes', 'progressive_carries', 'progressive_receptions',
+            'progressive_passes_per_90', 'progressive_carries_per_90', 'progressive_receptions_per_90',
+            # FBRef Possession/Creation features (6)
+            'touches', 'touches_att_3rd', 'sca', 'gca', 'sca_per_90', 'gca_per_90',
+            # FBRef Recoveries (2) - critical for MID/FWD DC prediction
+            'fbref_recoveries', 'fbref_recoveries_per_90',
+            # Predicted DC features (1) - combined prediction for DC points
+            'predicted_dc_per_90'
         ]
-        # Total: 37 features (17 FPL + 16 Understat + 4 derived)
+        # Total: 61 features (17 FPL + 16 Understat + 4 derived + 21 FBRef + 3 recoveries/DC)
 
     def load_model(self):
         """Load trained model from disk"""
@@ -120,11 +139,44 @@ class FPLPointsPredictor:
                 'xG_overperformance': float(p.get('xG_overperformance', 0)),
                 'xA_overperformance': float(p.get('xA_overperformance', 0)),
                 'npxG_overperformance': float(p.get('npxG_overperformance', 0)),
-                # Derived features
+                # Derived Understat features
                 'xG_xA_combined': float(p.get('xG_xA_combined', 0)),
                 'npxG_npxA_combined': float(p.get('npxG_npxA_combined', 0)),
                 'finishing_quality': float(p.get('finishing_quality', 1.0)),
-                'np_finishing_quality': float(p.get('np_finishing_quality', 1.0))
+                'np_finishing_quality': float(p.get('np_finishing_quality', 1.0)),
+                # FBRef Defensive features
+                'tackles': int(p.get('tackles', 0)),
+                'tackles_won': int(p.get('tackles_won', 0)),
+                'tackle_pct': float(p.get('tackle_pct', 0.0)),
+                'interceptions': int(p.get('interceptions', 0)),
+                'tackles_plus_int': int(p.get('tackles_plus_int', 0)),
+                'blocks': int(p.get('blocks', 0)),
+                'clearances': int(p.get('clearances', 0)),
+                'errors': int(p.get('errors', 0)),
+                'def_contributions': int(p.get('def_contributions', 0)),
+                'def_contributions_per_90': float(p.get('def_contributions_per_90', 0.0)),
+                # FBRef Derived defensive features
+                'def_contribution_prob': float(p.get('def_contribution_prob', 0.0)),
+                'expected_def_points': float(p.get('expected_def_points', 0.0)),
+                # FBRef Progressive features
+                'progressive_passes': int(p.get('progressive_passes', 0)),
+                'progressive_carries': int(p.get('progressive_carries', 0)),
+                'progressive_receptions': int(p.get('progressive_receptions', 0)),
+                'progressive_passes_per_90': float(p.get('progressive_passes_per_90', 0.0)),
+                'progressive_carries_per_90': float(p.get('progressive_carries_per_90', 0.0)),
+                'progressive_receptions_per_90': float(p.get('progressive_receptions_per_90', 0.0)),
+                # FBRef Possession/Creation features
+                'touches': int(p.get('touches', 0)),
+                'touches_att_3rd': int(p.get('touches_att_3rd', 0)),
+                'sca': int(p.get('sca', 0)),
+                'gca': int(p.get('gca', 0)),
+                'sca_per_90': float(p.get('sca_per_90', 0.0)),
+                'gca_per_90': float(p.get('gca_per_90', 0.0)),
+                # FBRef Recoveries (for MID/FWD DC prediction)
+                'fbref_recoveries': int(p.get('fbref_recoveries', 0)),
+                'fbref_recoveries_per_90': float(p.get('fbref_recoveries_per_90', 0.0)),
+                # Predicted DC (combined: base + recoveries for MID/FWD)
+                'predicted_dc_per_90': float(p.get('predicted_dc_per_90', 0.0))
             }
             features.append(row)
 

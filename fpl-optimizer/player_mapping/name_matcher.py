@@ -10,29 +10,30 @@ from pathlib import Path
 import unicodedata
 
 
-# Team name mapping between FPL and Understat
+# Team name mapping between FPL and external sources
+# Maps FPL team ID to a list of possible team names (Understat, FBRef)
 TEAM_MAPPING = {
-    # FPL ID -> Understat team name
-    1: "Arsenal",
-    2: "Aston Villa",
-    3: "Bournemouth",
-    4: "Brentford",
-    5: "Brighton",
-    6: "Chelsea",
-    7: "Crystal Palace",
-    8: "Everton",
-    9: "Fulham",
-    10: "Ipswich",
-    11: "Leicester",
-    12: "Liverpool",
-    13: "Manchester City",
-    14: "Manchester United",
-    15: "Newcastle",
-    16: "Nottingham Forest",
-    17: "Southampton",
-    18: "Tottenham",
-    19: "West Ham",
-    20: "Wolverhampton Wanderers",
+    # FPL ID -> List of team name variations (Understat, FBRef, etc.)
+    1: ["Arsenal"],
+    2: ["Aston Villa"],
+    3: ["Bournemouth"],
+    4: ["Brentford"],
+    5: ["Brighton"],
+    6: ["Chelsea"],
+    7: ["Crystal Palace"],
+    8: ["Everton"],
+    9: ["Fulham"],
+    10: ["Ipswich", "Ipswich Town"],
+    11: ["Leicester", "Leicester City"],
+    12: ["Liverpool"],
+    13: ["Manchester City"],
+    14: ["Manchester United", "Manchester Utd"],
+    15: ["Newcastle", "Newcastle Utd"],
+    16: ["Nottingham Forest", "Nott'ham Forest"],
+    17: ["Southampton"],
+    18: ["Tottenham"],
+    19: ["West Ham"],
+    20: ["Wolverhampton Wanderers", "Wolves"],
 }
 
 
@@ -85,11 +86,12 @@ class PlayerNameMatcher:
         try:
             with open(path, 'r') as f:
                 self.manual_mappings = json.load(f)
-            print(f"✅ Loaded {len(self.manual_mappings)} manual mappings")
+            # Note: Removed print() - it corrupts MCP stdout JSON protocol
         except FileNotFoundError:
-            print(f"📁 No manual mappings file at {path}")
+            pass  # Silent - no mappings file is OK
         except Exception as e:
-            print(f"❌ Error loading manual mappings: {e}")
+            import sys
+            print(f"Error loading manual mappings: {e}", file=sys.stderr)
 
     def save_manual_mappings(self, path: str):
         """
@@ -142,8 +144,8 @@ class PlayerNameMatcher:
         # Filter external players by team if team_id provided
         candidates = external_players
         if team_id and team_id in TEAM_MAPPING:
-            team_name = TEAM_MAPPING[team_id]
-            candidates = [p for p in external_players if p.get('team') == team_name]
+            team_names = TEAM_MAPPING[team_id]  # Now a list of possible names
+            candidates = [p for p in external_players if p.get('team') in team_names]
 
             if not candidates:
                 # Fallback to all players if team filtering yields no results
