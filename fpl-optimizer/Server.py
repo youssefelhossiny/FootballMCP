@@ -735,12 +735,15 @@ async def handle_call_tool(
             fpl_recoveries = player.get('fpl_recoveries', 0)
 
             results.append(f"\n📈 ACTUAL (FPL this season):")
-            results.append(f"DC Points Earned: {fpl_dc_points} pts")
+            results.append(f"DC: {fpl_dc_points} (CBI + Tackles + Recoveries)")
             results.append(f"CBI: {fpl_cbi} | Tackles: {fpl_tackles} | Recoveries: {fpl_recoveries}")
 
             # === PREDICTED DC (FBRef) ===
             results.append(f"\n🔮 PREDICTED (FBRef per 90):")
-            results.append(f"Tackles: {player.get('tackles', 0)} (Won: {player.get('tackles_won', 0)}, {player.get('tackle_pct', 0):.0f}%)")
+            tackles = player.get('tackles', 0)
+            tackles_won = player.get('tackles_won', 0)
+            tackle_pct = (tackles_won / tackles * 100) if tackles > 0 else 0
+            results.append(f"Tackles: {tackles} (Won: {tackles_won}, {tackle_pct:.0f}%)")
             results.append(f"Interceptions: {player.get('interceptions', 0)} | Blocks: {player.get('blocks', 0)}")
             results.append(f"Clearances: {player.get('clearances', 0)} | Recoveries: {player.get('fbref_recoveries', 0)}")
 

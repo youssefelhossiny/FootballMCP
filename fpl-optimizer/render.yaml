@@ -1,0 +1,31 @@
+# Render.com deployment configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: fpl-optimizer-api
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api_server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      # Anthropic API Key (set in Render dashboard)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Football Data API Key (set in Render dashboard)
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      # JWT Secret for access code authentication (set in Render dashboard)
+      # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      - key: JWT_SECRET_KEY
+        sync: false
+      # SHA256 hash of your access code (set in Render dashboard)
+      # Generate with: python -c "import hashlib; print(hashlib.sha256(b'YourCode').hexdigest())"
+      - key: ACCESS_CODE_HASH
+        sync: false
+      # Allowed CORS origins (set after deploying frontend)
+      # Example: https://your-app.vercel.app
+      - key: ALLOWED_ORIGINS
+        sync: false

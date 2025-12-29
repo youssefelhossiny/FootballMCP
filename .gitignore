@@ -1,0 +1,43 @@
+# Environment variables - CRITICAL
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+
+# Training data (large files)
+training_data.csv
+
+# Cache files
+fpl-optimizer/cache/
+*.json.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+build/
+.vercel/
+
+# Logs
+*.log
+npm-debug.log*
