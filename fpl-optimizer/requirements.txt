@@ -24,6 +24,7 @@ thefuzz>=0.22.0              # Fuzzy string matching
 python-Levenshtein>=0.25.0   # Fast fuzzy matching
 requests>=2.25.0             # HTTP requests
 requests-cache>=1.1.0        # Request caching
+soccerdata>=1.0.0            # FBRef data scraping
 
 # API Server (FastAPI)
 fastapi>=0.109.0             # Web framework
