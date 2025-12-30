@@ -237,7 +237,7 @@ async def query_anthropic(
 
             # Make API call
             response = client.messages.create(
-                model="claude-3-haiku-20240307",  # Fast and cheap
+                model="claude-3-5-haiku-20241022",  # Fast, cheap, and smarter
                 max_tokens=1500,
                 system=SYSTEM_PROMPT,
                 tools=anthropic_tools,
