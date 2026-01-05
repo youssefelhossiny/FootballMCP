@@ -59,11 +59,19 @@ class EnhancedDataCollector:
         print("📥 Fetching fresh Understat data...")
         players = self.understat_scraper.fetch_epl_players(season=season)
 
-        # Cache it
+        # Cache it if successful
         if players:
             self.cache.set(cache_key, players, format='json')
+            return players
 
-        return players
+        # FALLBACK: If fresh fetch failed, try to load stale cache
+        print("⚠️ Fresh Understat fetch failed, trying stale cache...")
+        stale_data = self.cache.get(cache_key, format='json', ignore_expiry=True)
+        if stale_data:
+            print(f"✅ Using stale Understat cache ({len(stale_data)} players)")
+            return stale_data
+
+        return []
 
     def fetch_fbref_data(self, season: str = "2025-2026", use_cache: bool = True) -> List[Dict]:
         """

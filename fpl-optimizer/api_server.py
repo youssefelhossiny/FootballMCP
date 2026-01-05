@@ -388,19 +388,55 @@ FPL_TOOLS = [
                 "required": ["available_chips"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_transfer",
+            "description": "Execute a transfer in the theoretical lineup - swap a player OUT from the user's team for a player IN. Use this when the user agrees to a transfer or asks to replace a specific player. The frontend will visually update the theoretical squad.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "player_out": {
+                        "type": "string",
+                        "description": "Name of the player to transfer OUT (must be in user's current team)"
+                    },
+                    "player_in": {
+                        "type": "string",
+                        "description": "Name of the player to transfer IN (replacement)"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason for the transfer (e.g., 'better fixtures', 'higher form', 'injury replacement')"
+                    }
+                },
+                "required": ["player_out", "player_in"]
+            }
+        }
     }
 ]
 
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
 
 class ChatRequest(BaseModel):
     message: str
     team_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None
+    history: Optional[List[ChatMessage]] = None  # Conversation history for context
 
+
+class TransferAction(BaseModel):
+    player_out: str
+    player_in: str
+    reason: Optional[str] = None
 
 class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
+    transfers: List[TransferAction] = []  # Transfers to apply to theoretical lineup
     model: str = "ollama"
 
 
@@ -1077,6 +1113,7 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
         message = request.message
         team_id = request.team_id
         user_context = request.context or {}
+        history = request.history or []
 
         # === VERBOSE LOGGING ===
         print(f"\n{'='*60}")
@@ -1085,6 +1122,7 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
         print(f"Message: {message}")
         print(f"Team ID: {team_id}")
         print(f"User Context: {user_context}")
+        print(f"History: {len(history)} previous messages")
 
         # Fetch team data if available
         team_data = None
@@ -1109,6 +1147,9 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
         print(context[:500])
         print(f"...")
 
+        # Convert history to format for Anthropic
+        conversation_history = [{"role": msg.role, "content": msg.content} for msg in history]
+
         # Use Anthropic Claude API with tool calling
         result = await query_anthropic(
             message=message,
@@ -1117,14 +1158,19 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
             execute_tool_func=execute_tool,
             players=players,
             teams=teams,
-            team_data=team_data
+            team_data=team_data,
+            history=conversation_history
         )
 
-        # Unpack tuple result (response, tools_used)
+        # Unpack tuple result (response, tools_used, transfers)
         if isinstance(result, tuple):
-            response, tools_used = result
+            if len(result) == 3:
+                response, tools_used, transfer_list = result
+            else:
+                response, tools_used = result
+                transfer_list = []
         else:
-            response, tools_used = result, []
+            response, tools_used, transfer_list = result, [], []
 
         if not response:
             # Fallback to rule-based only if Anthropic fails
@@ -1134,11 +1180,27 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
             else:
                 response = await fallback_response(message.lower(), team_data, players, teams)
 
+        # Convert transfer_list to TransferAction objects
+        transfers = [
+            TransferAction(
+                player_out=t.get("player_out", ""),
+                player_in=t.get("player_in", ""),
+                reason=t.get("reason", "")
+            )
+            for t in transfer_list
+        ]
+
         print(f"\n📤 RESPONSE (first 300 chars): {response[:300]}...")
         print(f"🔧 TOOLS USED: {tools_used}")
+        print(f"🔄 TRANSFERS: {[f'{t.player_out} -> {t.player_in}' for t in transfers]}")
         print(f"{'='*60}\n")
 
-        return ChatResponse(response=response, tools_used=tools_used, model="anthropic/claude-3-haiku")
+        return ChatResponse(
+            response=response,
+            tools_used=tools_used,
+            transfers=transfers,
+            model="anthropic/claude-3.5-haiku"
+        )
 
     except HTTPException:
         # Re-raise auth errors as-is
@@ -1240,9 +1302,18 @@ def build_comprehensive_context(team_data: Optional[Dict], players: List[Dict], 
         free_transfers = user_context.get('free_transfers', 1)
         available_chips = user_context.get('available_chips', [])
         active_chip = user_context.get('active_chip')
+        transfers_made = user_context.get('transfers_made', [])
 
         parts.append("**User's FPL Resources:**")
-        parts.append(f"Free Transfers: {free_transfers}")
+        parts.append(f"Free Transfers Remaining: {free_transfers}")
+
+        # Show transfers already made in theoretical lineup
+        if transfers_made:
+            parts.append(f"\n**TRANSFERS ALREADY MADE THIS SESSION ({len(transfers_made)}):**")
+            for t in transfers_made:
+                parts.append(f"  ❌ OUT: {t.get('out', 'Unknown')} → ✅ IN: {t.get('in', 'Unknown')}")
+            parts.append("(These players are already in your theoretical squad - suggest OTHER transfers)")
+            parts.append("")
 
         if available_chips:
             parts.append(f"Available Chips: {', '.join(available_chips)}")
@@ -1412,6 +1483,12 @@ async def execute_tool(tool_name: str, args: Dict, players: List[Dict], teams: D
         elif tool_name == "get_chip_strategy":
             available_chips = args.get("available_chips", [])
             return await tool_chip_strategy(available_chips)
+
+        elif tool_name == "make_transfer":
+            player_out = args.get("player_out", "")
+            player_in = args.get("player_in", "")
+            reason = args.get("reason", "")
+            return await tool_make_transfer(player_out, player_in, reason, players, teams, team_data)
 
         else:
             return f"Unknown tool: {tool_name}"
@@ -1772,6 +1849,66 @@ async def tool_chip_strategy(available_chips: List[str]) -> str:
     return "\n".join(lines)
 
 
+async def tool_make_transfer(player_out: str, player_in: str, reason: str, players: List[Dict], teams: Dict, team_data: Optional[Dict]) -> str:
+    """
+    Execute a transfer in the theoretical lineup.
+    Returns confirmation message and transfer details for the frontend to apply.
+    """
+    # Find player_out in user's team
+    out_player = None
+    if team_data and team_data.get('players'):
+        for p in team_data['players']:
+            web_name = p.get('web_name', '').lower()
+            name = p.get('name', '').lower()
+            if player_out.lower() in web_name or player_out.lower() in name or web_name in player_out.lower():
+                out_player = p
+                break
+
+    if not out_player:
+        return f"Could not find '{player_out}' in your current team. Please check the spelling or use the player's FPL name."
+
+    # Find player_in from all players
+    in_player = None
+    search = player_in.lower()
+    for p in players:
+        web_name = p.get('web_name', '').lower()
+        full_name = f"{p.get('first_name', '')} {p.get('second_name', '')}".lower()
+        if search in web_name or search in full_name or web_name in search:
+            in_player = p
+            break
+
+    if not in_player:
+        return f"Could not find '{player_in}' in the FPL database. Please check the spelling."
+
+    # Get team names
+    out_team = out_player.get('team', '')
+    in_team = teams.get(in_player.get('team', 0), {}).get('short_name', '?')
+
+    # Calculate prices
+    out_price = out_player.get('price', out_player.get('now_cost', 0))
+    in_price = in_player.get('now_cost', 0)
+    price_diff = (in_price - out_price) / 10
+
+    # Build response
+    lines = [
+        f"**Transfer Executed:**",
+        f"OUT: {out_player.get('web_name')} ({out_team}) - £{out_price/10:.1f}m",
+        f"IN: {in_player.get('web_name')} ({in_team}) - £{in_price/10:.1f}m",
+        f"Price difference: {'+'if price_diff > 0 else ''}£{price_diff:.1f}m"
+    ]
+
+    if reason:
+        lines.append(f"Reason: {reason}")
+
+    # Add stats comparison
+    lines.append(f"\n**Quick Stats:**")
+    lines.append(f"• {in_player.get('web_name')}: Form {in_player.get('form', 0)}, Points {in_player.get('total_points', 0)}, xG {in_player.get('xG', 0):.1f}")
+
+    lines.append(f"\n*The theoretical lineup on the left has been updated to show this transfer.*")
+
+    return "\n".join(lines)
+
+
 # ============== NEW TOOL FUNCTIONS (6 added) ==============
 
 def tool_get_all_players(players: List[Dict], teams: Dict, position: str, team_filter: Optional[str],
@@ -2046,40 +2183,56 @@ async def tool_optimize_lineup(team_id: int, gameweek: Optional[int], players: L
 
 
 async def tool_suggest_captain(team_id: int, gameweek: Optional[int], players: List[Dict], teams: Dict) -> str:
-    """Suggest captain for user's team"""
+    """Suggest captain for user's team - uses enhanced player data with xG/xA from FBRef"""
     try:
         data = await make_fpl_request("bootstrap-static/")
-        players_dict = {p['id']: p for p in data.get('elements', [])}
         current_gw = gameweek or next((e['id'] for e in data.get('events', []) if e.get('is_current')), 1)
+
+        # Create lookup from enhanced players (with xG/xA from FBRef)
+        enhanced_dict = {p['id']: p for p in players}
 
         picks_data = await make_fpl_request(f"entry/{team_id}/event/{current_gw}/picks/")
         if "error" in picks_data:
             return f"Could not fetch team {team_id}"
 
-        # Score each player for captaincy
+        # Score each player for captaincy using ENHANCED data
         candidates = []
         for pick in picks_data.get('picks', []):
-            player = players_dict.get(pick['element'])
+            player_id = pick['element']
+            # Use enhanced player data (has xG/xA from FBRef)
+            player = enhanced_dict.get(player_id)
             if player:
                 form = float(player.get('form', 0) or 0)
-                xg90 = player.get('xG_per_90', 0)
-                xa90 = player.get('xA_per_90', 0)
-                # Premium bonus
-                premium_bonus = 1 if player.get('now_cost', 0) >= 100 else 0
-                score = form * 1.5 + xg90 * 3 + xa90 * 2 + premium_bonus
-                candidates.append({**player, 'captain_score': score})
+                # Get xG/xA from enhanced data (FBRef fields)
+                xg90 = float(player.get('npxG_per_90', 0) or player.get('xG_per_90', 0) or 0)
+                xa90 = float(player.get('xA_per_90', 0) or 0)
+                total_points = int(player.get('total_points', 0) or 0)
+                # Premium bonus for expensive players
+                premium_bonus = 1.5 if player.get('now_cost', 0) >= 100 else 0
+                # Calculate captain score with xG/xA weighted heavily
+                score = form * 1.5 + xg90 * 4 + xa90 * 3 + (total_points / 20) + premium_bonus
+                candidates.append({
+                    **player,
+                    'captain_score': score,
+                    'xg90': xg90,
+                    'xa90': xa90
+                })
 
         candidates.sort(key=lambda x: x['captain_score'], reverse=True)
         top3 = candidates[:3]
 
         lines = [f"**Captain Recommendations GW{current_gw}**", ""]
         for i, p in enumerate(top3, 1):
-            team = teams.get(p['team'], {}).get('short_name', '?')
+            team_name = teams.get(p['team'], {}).get('short_name', '?')
             form = p.get('form', 0)
-            xg = p.get('xG_per_90', 0)
+            xg = p.get('xg90', 0)
+            xa = p.get('xa90', 0)
+            pts = p.get('total_points', 0)
             emoji = "👑" if i == 1 else "🥈" if i == 2 else "🥉"
-            lines.append(f"{emoji} **{p['web_name']}** ({team})")
-            lines.append(f"   Form: {form} | xG/90: {xg:.2f} | Score: {p['captain_score']:.1f}")
+            lines.append(f"{emoji} **{p['web_name']}** ({team_name})")
+            lines.append(f"   Form: {form} | xG/90: {xg:.2f} | xA/90: {xa:.2f} | Total Pts: {pts}")
+            lines.append(f"   Captain Score: {p['captain_score']:.1f}")
+            lines.append("")
 
         return "\n".join(lines)
     except Exception as e:

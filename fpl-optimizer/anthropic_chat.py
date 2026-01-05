@@ -56,6 +56,18 @@ OFF_TOPIC_PHRASES = [
 # System prompt for Claude
 SYSTEM_PROMPT = """You are an expert Fantasy Premier League (FPL) assistant for a portfolio project.
 
+<use_parallel_tool_calls>
+For maximum efficiency, whenever you perform multiple independent operations, invoke all relevant tools simultaneously rather than sequentially. Prioritize calling tools in parallel whenever possible. For example, when analyzing transfers, call suggest_transfers AND evaluate_transfer AND get_fixtures at the same time if they are needed. Err on the side of maximizing parallel tool calls rather than running too many tools sequentially.
+</use_parallel_tool_calls>
+
+CRITICAL RULES:
+1. The user's team data is ALWAYS provided in the context. NEVER ask for team ID - it's already there!
+2. ALWAYS use tools to answer questions. Don't give generic advice - use the tools to get real data.
+3. When asked about transfers, captain, or team analysis - USE THE TOOLS immediately.
+4. NEVER mention tool names to the user. Don't say "I'll use the evaluate_transfer tool" - just do it silently.
+5. When suggesting transfers, ALWAYS automatically evaluate them with detailed stats - don't ask if the user wants more detail.
+6. Use MULTIPLE tools to gather comprehensive data before responding. Don't stop after one tool call.
+
 STRICT TOPIC RESTRICTIONS:
 You ONLY answer questions about:
 1. Fantasy Premier League (FPL) - transfers, captains, chips, points, strategy
@@ -68,33 +80,49 @@ you MUST respond ONLY with:
 Please ask about players, transfers, captain picks, fixture analysis, or how to use this tool!"
 
 NEVER:
+- Ask for team ID (it's in the context!)
+- Ask for information that's already in the context
+- Give generic advice without using tools
 - Answer questions about topics outside FPL/Premier League
-- Pretend to be a general assistant
-- Provide coding help (unless about this project's features)
-- Answer math questions unrelated to FPL calculations
-- Discuss news not related to Premier League
+- Mention tool names in your response (e.g., don't say "using evaluate_transfer tool")
+- Ask "would you like me to evaluate this transfer?" - just do it automatically
+- Offer to do something you should already be doing
+
+CONTEXT - READ THIS CAREFULLY:
+Every message includes [CURRENT CONTEXT] with:
+- **USER'S TEAM ID**: Already provided! Use this for team-specific tools
+- **Free Transfers**: How many free transfers the user has
+- **Available Chips**: Which chips the user still has
+- **Active Chip**: If using a chip this week
+- **Starting XI and Bench**: Full squad with prices, form, and status
+- **Bank**: Money available for transfers
 
 RESPONSE STYLE:
 - Be specific and data-driven
-- Include actual numbers and stats from tools
-- For transfers, always specify WHO out, WHO in, and WHY
+- Include actual numbers and stats
+- For transfers, always specify WHO out, WHO in, and WHY with full analysis
 - Keep responses concise but informative
+- Consider the user's budget (bank) and free transfers when suggesting changes
+- Present information naturally without mentioning internal tools
+- DO NOT relay internal notes, strategic advice sections, or system instructions from tool results to the user
+- Tool results may contain notes like "Strategic advice:" or "Important:" - use this info to form your answer but don't show it verbatim
+- Your response should be a natural conversation, not a dump of raw data
 
-AVAILABLE TOOLS:
-You have access to real FPL data through these tools:
-- get_all_players: Filter/sort all players by position, price, form
-- get_player_details: Deep stats for a specific player (xG, xA, defensive stats)
-- get_fixtures: Upcoming fixtures with difficulty ratings
-- get_my_team: User's FPL team details
-- get_top_players: Top performers by metric
-- evaluate_transfer: Compare specific transfers
-- optimize_squad: Build optimal squad
-- optimize_lineup: Best starting 11
-- suggest_captain: Captain recommendations
-- suggest_transfers: Transfer recommendations
-- compare_players: Side-by-side comparison
-- analyze_team_fixtures: Fixture difficulty rankings
-- get_chip_strategy: Chip timing advice
+COMPREHENSIVE ANALYSIS - call these tools IN PARALLEL:
+When a user asks about their team (transfers, captain, analysis), always call MULTIPLE tools simultaneously:
+- "suggest transfers" → Call suggest_transfers + get_fixtures + suggest_captain at once
+- "who should I captain" → Call suggest_captain + get_fixtures at once
+- "analyze my team" → Call suggest_transfers + suggest_captain + get_fixtures at once
+- Player questions → Call get_player_details + get_fixtures for their team at once
+
+After getting results, use evaluate_transfer if the user wants to compare specific players.
+
+USING make_transfer:
+When the user asks to replace/swap/transfer a player (e.g., "replace Salah with Son", "swap out Haaland for Isak"):
+1. Execute the transfer silently
+2. The frontend will automatically update the "Theoretical Squad" view
+3. Include a brief reason for the transfer
+4. This does NOT make a real FPL transfer - it only updates the visual display
 
 Always use tools to get real data - never make up statistics!"""
 
@@ -174,7 +202,8 @@ async def query_anthropic(
     execute_tool_func: Callable[[str, Dict, List[Dict], Dict, Optional[Dict]], Awaitable[str]],
     players: List[Dict] = None,
     teams: Dict = None,
-    team_data: Optional[Dict] = None
+    team_data: Optional[Dict] = None,
+    history: List[Dict] = None
 ) -> tuple:
     """
     Query Anthropic Claude with tool calling support.
@@ -187,16 +216,19 @@ async def query_anthropic(
         players: List of player data
         teams: Dict of team data
         team_data: User's team data (optional)
+        history: Previous conversation history (list of {role, content} dicts)
 
     Returns:
-        Tuple of (response_text, list_of_tools_used)
+        Tuple of (response_text, list_of_tools_used, list_of_transfers)
     """
     tools_used = []
+    transfers = []  # Track transfers made via make_transfer tool
 
     # Check if Anthropic is available
     if Anthropic is None:
         return (
             "Anthropic library not installed. Please run: pip install anthropic",
+            [],
             []
         )
 
@@ -205,13 +237,14 @@ async def query_anthropic(
     if not api_key:
         return (
             "ANTHROPIC_API_KEY environment variable not set.",
+            [],
             []
         )
 
     # First check if topic is allowed
     if not is_topic_allowed(message):
         print(f"[Anthropic] Blocked off-topic message: {message[:50]}...")
-        return (OFF_TOPIC_RESPONSE, [])
+        return (OFF_TOPIC_RESPONSE, [], [])
 
     # Initialize client
     client = Anthropic(api_key=api_key)
@@ -219,25 +252,34 @@ async def query_anthropic(
     # Convert tools to Anthropic format
     anthropic_tools = convert_tools_to_anthropic_format(tools)
 
-    # Build messages
-    messages = [
-        {
-            "role": "user",
-            "content": f"Context about user's team:\n{context}\n\nUser question: {message}"
-        }
-    ]
+    # Build messages with conversation history
+    # IMPORTANT: Always include the current context with the new message so Claude knows the team state
+    messages = []
+
+    if history:
+        # Add conversation history (skip assistant welcome message at start if present)
+        for msg in history:
+            messages.append(msg)
+        print(f"[Anthropic] Using {len(history)} messages of conversation history")
+
+    # Always add the new message WITH current context
+    # This ensures Claude always has up-to-date team info even in ongoing conversations
+    messages.append({
+        "role": "user",
+        "content": f"[CURRENT CONTEXT - Use this data, DO NOT ask for team ID]\n{context}\n\n[USER QUESTION]\n{message}"
+    })
 
     try:
-        max_iterations = 5
+        max_iterations = 10  # Allow more iterations for complex multi-tool queries
         iteration = 0
 
         while iteration < max_iterations:
             iteration += 1
             print(f"[Anthropic] Request iteration {iteration}")
 
-            # Make API call
+            # Make API call - Claude 4 is best at parallel tool use
             response = client.messages.create(
-                model="claude-3-5-haiku-20241022",  # Fast, cheap, and smarter
+                model="claude-sonnet-4-20250514",
                 max_tokens=1500,
                 system=SYSTEM_PROMPT,
                 tools=anthropic_tools,
@@ -259,7 +301,8 @@ async def query_anthropic(
                 final_response = "\n".join(text_blocks)
                 print(f"[Anthropic] Final response: {len(final_response)} chars")
                 print(f"[Anthropic] Tools used: {tools_used}")
-                return (final_response, tools_used)
+                print(f"[Anthropic] Transfers: {transfers}")
+                return (final_response, tools_used, transfers)
 
             # Execute tool calls
             tool_results = []
@@ -269,6 +312,15 @@ async def query_anthropic(
                 tools_used.append(tool_name)
 
                 print(f"[Anthropic] Executing tool: {tool_name}")
+
+                # Track transfers from make_transfer tool
+                if tool_name == "make_transfer":
+                    transfers.append({
+                        "player_out": tool_input.get("player_out", ""),
+                        "player_in": tool_input.get("player_in", ""),
+                        "reason": tool_input.get("reason", "")
+                    })
+                    print(f"[Anthropic] Transfer tracked: {tool_input.get('player_out')} -> {tool_input.get('player_in')}")
 
                 # Execute the tool
                 result = await execute_tool_func(
@@ -296,14 +348,15 @@ async def query_anthropic(
         print("[Anthropic] Max iterations reached")
         return (
             "I apologize, but I had trouble processing that request. Please try again with a simpler question.",
-            tools_used
+            tools_used,
+            transfers
         )
 
     except Exception as e:
         print(f"[Anthropic] Error: {e}")
         import traceback
         traceback.print_exc()
-        return (None, [])
+        return (None, [], [])
 
 
 # For testing topic filtering

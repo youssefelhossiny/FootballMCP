@@ -12,25 +12,26 @@ import unicodedata
 
 # Team name mapping between FPL and external sources
 # Maps FPL team ID to a list of possible team names (Understat, FBRef)
+# Updated for 2025/26 season (Burnley, Leeds, Sunderland promoted)
 TEAM_MAPPING = {
     # FPL ID -> List of team name variations (Understat, FBRef, etc.)
     1: ["Arsenal"],
     2: ["Aston Villa"],
-    3: ["Bournemouth"],
-    4: ["Brentford"],
-    5: ["Brighton"],
-    6: ["Chelsea"],
-    7: ["Crystal Palace"],
-    8: ["Everton"],
-    9: ["Fulham"],
-    10: ["Ipswich", "Ipswich Town"],
-    11: ["Leicester", "Leicester City"],
+    3: ["Burnley"],
+    4: ["Bournemouth"],
+    5: ["Brentford"],
+    6: ["Brighton"],
+    7: ["Chelsea"],
+    8: ["Crystal Palace"],
+    9: ["Everton"],
+    10: ["Fulham"],
+    11: ["Leeds"],
     12: ["Liverpool"],
     13: ["Manchester City"],
     14: ["Manchester United", "Manchester Utd"],
-    15: ["Newcastle", "Newcastle Utd"],
+    15: ["Newcastle United", "Newcastle Utd", "Newcastle"],
     16: ["Nottingham Forest", "Nott'ham Forest"],
-    17: ["Southampton"],
+    17: ["Sunderland"],
     18: ["Tottenham"],
     19: ["West Ham"],
     20: ["Wolverhampton Wanderers", "Wolves"],

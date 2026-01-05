@@ -31,13 +31,14 @@ class DataCache:
         safe_key = key.replace("/", "_").replace(":", "_")
         return self.cache_dir / f"{safe_key}.{format}"
 
-    def get(self, key: str, format: str = "pkl") -> Optional[Any]:
+    def get(self, key: str, format: str = "pkl", ignore_expiry: bool = False) -> Optional[Any]:
         """
         Get value from cache if it exists and is not expired
 
         Args:
             key: Cache key
             format: 'pkl' for pickle or 'json' for JSON
+            ignore_expiry: If True, return cached data even if expired (for fallback scenarios)
 
         Returns:
             Cached value if valid, None if expired or not found
@@ -58,12 +59,15 @@ class DataCache:
 
             # Check expiry
             timestamp = datetime.fromisoformat(cache_data['timestamp'])
+            age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+
             if datetime.now() - timestamp < self.ttl:
-                age_hours = (datetime.now() - timestamp).total_seconds() / 3600
                 print(f"✅ Cache hit for '{key}' (age: {age_hours:.1f}h)")
                 return cache_data['data']
+            elif ignore_expiry:
+                print(f"⚠️ Using stale cache for '{key}' (age: {age_hours:.1f}h)")
+                return cache_data['data']
             else:
-                age_hours = (datetime.now() - timestamp).total_seconds() / 3600
                 print(f"⏰ Cache expired for '{key}' (age: {age_hours:.1f}h)")
                 return None
 

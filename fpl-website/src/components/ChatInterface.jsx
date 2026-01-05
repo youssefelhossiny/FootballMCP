@@ -155,58 +155,11 @@ function formatInlineMarkdown(text) {
   return parts.length > 0 ? parts : text
 }
 
-// Extract transfer suggestions from response text
-function extractTransfers(text, teamPlayers = []) {
-  const transfers = []
+// NOTE: Text-based transfer extraction has been removed
+// Transfers are now ONLY applied when Claude explicitly calls the make_transfer tool
+// This prevents false positives from parsing suggestion text as actual transfers
 
-  // Common patterns for transfer suggestions:
-  // "sell X and buy Y", "transfer out X for Y", "replace X with Y", "X -> Y", "X → Y"
-  // "OUT: X, IN: Y", "remove X, bring in Y"
-
-  const patterns = [
-    // "sell X and buy Y" or "sell X for Y"
-    /(?:sell|transfer out|move out|remove)\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)\s+(?:and|for|to)\s+(?:buy|get|bring in|transfer in)\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-    // "replace X with Y"
-    /replace\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)\s+with\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-    // "X -> Y" or "X → Y"
-    /([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)\s*(?:->|→|➔|=>)\s*([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-    // "OUT: X, IN: Y"
-    /OUT:\s*([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)[,\s]+IN:\s*([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-    // "transfer X out for Y"
-    /transfer\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)\s+out\s+(?:for|and get)\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-    // "bring in Y for X" or "get Y for X"
-    /(?:bring in|get)\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)\s+(?:for|to replace)\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)?)/gi,
-  ]
-
-  patterns.forEach(pattern => {
-    let match
-    while ((match = pattern.exec(text)) !== null) {
-      // For "bring in Y for X" pattern, order is reversed
-      if (pattern.source.includes('bring in|get')) {
-        transfers.push({
-          out: { name: match[2].trim() },
-          in: { name: match[1].trim() }
-        })
-      } else {
-        transfers.push({
-          out: { name: match[1].trim() },
-          in: { name: match[2].trim() }
-        })
-      }
-    }
-  })
-
-  // Remove duplicates based on out player name
-  const seen = new Set()
-  return transfers.filter(t => {
-    const key = t.out.name.toLowerCase()
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-function ChatInterface({ teamId, team, onTransferSuggestion, freeTransfers = 1, availableChips = {}, activeChip = null }) {
+function ChatInterface({ teamId, team, onTransferSuggestion, freeTransfers = 1, availableChips = {}, activeChip = null, suggestedTransfers = [] }) {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
@@ -248,6 +201,10 @@ function ChatInterface({ teamId, team, onTransferSuggestion, freeTransfers = 1, 
 
     const userMessage = input.trim()
     setInput('')
+
+    // Get current messages before adding the new one (for history)
+    const currentMessages = [...messages]
+
     setMessages(prev => [...prev, { role: 'user', content: userMessage }])
     setLoading(true)
 
@@ -264,13 +221,20 @@ function ChatInterface({ teamId, team, onTransferSuggestion, freeTransfers = 1, 
           team_id: teamId,
           context: {
             team_name: team?.team_name,
-            players: team?.players?.map(p => p.name),
-            free_transfers: freeTransfers,
+            players: team?.players?.map(p => p.web_name || p.name),
+            free_transfers: freeTransfers - suggestedTransfers.length, // Subtract transfers already made
             available_chips: Object.entries(availableChips)
               .filter(([_, available]) => available)
               .map(([chip]) => chip),
-            active_chip: activeChip
-          }
+            active_chip: activeChip,
+            // Include transfers already made in theoretical lineup
+            transfers_made: suggestedTransfers.map(t => ({
+              out: t.out?.web_name || t.out?.name,
+              in: t.in?.web_name || t.in?.name
+            }))
+          },
+          // Send conversation history for context continuity
+          history: currentMessages.map(m => ({ role: m.role, content: m.content }))
         })
       })
 
@@ -289,26 +253,19 @@ function ChatInterface({ teamId, team, onTransferSuggestion, freeTransfers = 1, 
       const data = await response.json()
       setMessages(prev => [...prev, { role: 'assistant', content: data.response }])
 
-      // Check for transfer suggestions in BOTH user input and bot response
-      if (onTransferSuggestion) {
-        // First check user's message for direct transfer requests like "replace X with Y"
-        let transfers = extractTransfers(userMessage, team?.players || [])
-
-        // Also check bot's response for any transfer suggestions
-        if (data.response) {
-          const botTransfers = extractTransfers(data.response, team?.players || [])
-          // Merge, avoiding duplicates
-          botTransfers.forEach(bt => {
-            if (!transfers.some(t => t.out.name.toLowerCase() === bt.out.name.toLowerCase())) {
-              transfers.push(bt)
-            }
-          })
-        }
-
-        if (transfers.length > 0) {
-          onTransferSuggestion(transfers)
-        }
+      // Handle transfers from API response ONLY when make_transfer tool is explicitly used
+      // This prevents false positives from text parsing - transfers only happen when user confirms
+      if (onTransferSuggestion && data.transfers && data.transfers.length > 0) {
+        // API returned explicit transfers from Claude's make_transfer tool calls
+        const apiTransfers = data.transfers.map(t => ({
+          out: { name: t.player_out },
+          in: { name: t.player_in },
+          reason: t.reason
+        }))
+        onTransferSuggestion(apiTransfers)
       }
+      // NOTE: Removed text-based transfer extraction fallback to prevent false positives
+      // Transfers should ONLY be applied when Claude explicitly calls the make_transfer tool
     } catch (err) {
       setMessages(prev => [...prev, {
         role: 'assistant',

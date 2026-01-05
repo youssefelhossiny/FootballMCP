@@ -584,11 +584,12 @@ function UserTeamPage() {
               <h2 className="text-xl font-semibold text-white mb-4">Ask About Your Team</h2>
               <ChatInterface
                 teamId={savedTeamId}
-                team={team}
+                team={theoreticalTeam || team}
                 onTransferSuggestion={applyTransfers}
                 freeTransfers={freeTransfersOverride !== null ? freeTransfersOverride : (team?.free_transfers || 1)}
                 availableChips={availableChips}
                 activeChip={activeChip}
+                suggestedTransfers={suggestedTransfers}
               />
             </div>
           </div>
