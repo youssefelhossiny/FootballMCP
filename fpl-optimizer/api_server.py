@@ -1067,7 +1067,10 @@ async def get_user_team(team_id: int):
                     'name': f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
                     'web_name': player.get('web_name', ''),
                     'team': teams.get(player.get('team', 0), ''),
+                    'team_code': player.get('team_code', 0),
                     'position': player.get('element_type', 0),
+                    'element_type': player.get('element_type', 0),
+                    'now_cost': player.get('now_cost', 0),
                     'price': player.get('now_cost', 0),
                     'total_points': player.get('total_points', 0),
                     'last_gw_points': last_gw_points,
@@ -1097,6 +1100,230 @@ async def get_user_team(team_id: int):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== BOT TEAM ENDPOINT ==============
+# Bot's FPL team ID - hardcoded for the autonomous bot
+BOT_TEAM_ID = int(os.getenv("BOT_TEAM_ID", "12777515"))
+
+@app.get("/api/bot/team")
+async def get_bot_team():
+    """
+    Get the bot's autonomous FPL team data.
+    This is a public endpoint (no auth required) for displaying the bot's team.
+    """
+    try:
+        ssl_context = get_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Fetch team info
+            team_url = f"https://fantasy.premierleague.com/api/entry/{BOT_TEAM_ID}/"
+            async with session.get(team_url) as resp:
+                if resp.status == 404:
+                    raise HTTPException(status_code=404, detail="Bot team not found")
+                if resp.status != 200:
+                    raise HTTPException(status_code=resp.status, detail="Failed to fetch bot team")
+                team_info = await resp.json()
+
+            # Get bootstrap data (players, teams, events)
+            gw_url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+            async with session.get(gw_url) as resp:
+                bootstrap = await resp.json()
+
+            current_gw = next(
+                (e['id'] for e in bootstrap['events'] if e['is_current']),
+                1
+            )
+
+            # Fetch team picks for current gameweek
+            picks_url = f"https://fantasy.premierleague.com/api/entry/{BOT_TEAM_ID}/event/{current_gw}/picks/"
+            async with session.get(picks_url) as resp:
+                if resp.status != 200:
+                    picks_data = {"picks": [], "entry_history": {}}
+                else:
+                    picks_data = await resp.json()
+
+            # Fetch transfer history
+            transfers_url = f"https://fantasy.premierleague.com/api/entry/{BOT_TEAM_ID}/transfers/"
+            async with session.get(transfers_url) as resp:
+                if resp.status == 200:
+                    transfers_data = await resp.json()
+                else:
+                    transfers_data = []
+
+            # Fetch chip history from entry history
+            history_url = f"https://fantasy.premierleague.com/api/entry/{BOT_TEAM_ID}/history/"
+            async with session.get(history_url) as resp:
+                if resp.status == 200:
+                    history_data = await resp.json()
+                else:
+                    history_data = {"chips": [], "current": []}
+
+            # Map player IDs to full player data
+            all_players = {p['id']: p for p in bootstrap['elements']}
+            teams = {t['id']: t['short_name'] for t in bootstrap['teams']}
+
+            # Build players list
+            players = []
+            for pick in picks_data.get('picks', []):
+                player_id = pick['element']
+                player = all_players.get(player_id, {})
+
+                players.append({
+                    'id': player_id,
+                    'name': f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
+                    'web_name': player.get('web_name', ''),
+                    'team': teams.get(player.get('team', 0), ''),
+                    'team_code': player.get('team_code', 0),
+                    'position': player.get('element_type', 0),
+                    'element_type': player.get('element_type', 0),
+                    'now_cost': player.get('now_cost', 0),
+                    'price': player.get('now_cost', 0),
+                    'total_points': player.get('total_points', 0),
+                    'last_gw_points': player.get('event_points', 0),
+                    'form': player.get('form', '0'),
+                    'is_captain': pick.get('is_captain', False),
+                    'is_vice_captain': pick.get('is_vice_captain', False),
+                    'multiplier': pick.get('multiplier', 1),
+                    'is_bench': pick.get('position', 0) > 11,
+                    'bench_order': pick.get('position', 0) - 11 if pick.get('position', 0) > 11 else 0,
+                    'status': player.get('status', 'a'),
+                    'news': player.get('news', '')
+                })
+
+            # Process transfers (last 10)
+            recent_transfers = []
+            for transfer in transfers_data[:10]:
+                player_in = all_players.get(transfer.get('element_in'), {})
+                player_out = all_players.get(transfer.get('element_out'), {})
+                recent_transfers.append({
+                    'gameweek': transfer.get('event', 0),
+                    'player_in': player_in.get('web_name', 'Unknown'),
+                    'player_out': player_out.get('web_name', 'Unknown'),
+                    'player_in_cost': transfer.get('element_in_cost', 0),
+                    'player_out_cost': transfer.get('element_out_cost', 0)
+                })
+
+            # Process chip usage
+            chips_used = history_data.get('chips', [])
+            chips = {
+                'wildcard1': {'used': False, 'gameweek': None},
+                'wildcard2': {'used': False, 'gameweek': None},
+                'freehit': {'used': False, 'gameweek': None},
+                'benchboost': {'used': False, 'gameweek': None},
+                'triplecaptain': {'used': False, 'gameweek': None}
+            }
+            for chip in chips_used:
+                chip_name = chip.get('name', '').lower().replace(' ', '')
+                if chip_name in chips:
+                    chips[chip_name] = {'used': True, 'gameweek': chip.get('event')}
+                elif chip_name == 'wildcard':
+                    # First or second wildcard based on gameweek
+                    if chip.get('event', 0) <= 19:
+                        chips['wildcard1'] = {'used': True, 'gameweek': chip.get('event')}
+                    else:
+                        chips['wildcard2'] = {'used': True, 'gameweek': chip.get('event')}
+
+            # Calculate stats
+            entry_history = picks_data.get('entry_history', {})
+            gw_history = history_data.get('current', [])
+
+            total_points = team_info.get('summary_overall_points') or 0
+            gw_points = entry_history.get('points', 0)
+            overall_rank = team_info.get('summary_overall_rank')
+            team_value = team_info.get('last_deadline_value', 1000)
+            bank = team_info.get('last_deadline_bank', 0)
+
+            # Calculate average points per gameweek
+            gameweeks_played = len(gw_history)
+            avg_points = round(total_points / gameweeks_played, 1) if gameweeks_played > 0 else 0
+
+            # Transfers this gameweek
+            transfers_this_gw = entry_history.get('event_transfers', 0)
+
+            return {
+                'gameweek': current_gw,
+                'team': {
+                    'team_id': BOT_TEAM_ID,
+                    'team_name': team_info.get('name', 'Claude\'s XI'),
+                    'manager_name': f"{team_info.get('player_first_name', '')} {team_info.get('player_last_name', '')}".strip(),
+                    'total_points': total_points,
+                    'gw_points': gw_points,
+                    'overall_rank': overall_rank,
+                    'team_value': team_value,
+                    'bank': bank,
+                    'avg_points_per_gw': avg_points,
+                    'transfers_this_week': transfers_this_gw,
+                    'gameweeks_played': gameweeks_played,
+                    'players': players,
+                    'transfers': recent_transfers,
+                    'chips': chips
+                }
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bot/decision")
+async def get_bot_decision(early: bool = False):
+    """
+    Get bot's autonomous decision for the current gameweek.
+
+    Parameters:
+    - early: If True, runs early decision mode (for price change monitoring)
+             If False, runs final decision mode (before deadline)
+
+    Returns:
+    - Transfer recommendations with reasons
+    - Chip strategy evaluation
+    - Captain/Vice-captain selection
+    - Price change risks for current squad
+    - Top rising/falling players in the game
+    """
+    from bot_decision_maker import run_bot_decision
+
+    try:
+        result = await run_bot_decision(BOT_TEAM_ID, is_early_run=early)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bot/price-changes")
+async def get_price_changes():
+    """
+    Get players most likely to have price changes.
+
+    First tries LiveFPL.net (most accurate - 99% rise, 98% fall accuracy).
+    Falls back to FPL API transfer data if LiveFPL unavailable.
+
+    Returns:
+    - rising: Top 20 players most likely to rise in price
+    - falling: Top 20 players most likely to fall in price
+    - source: 'livefpl.net' or 'fpl_api'
+    - accuracy: Prediction accuracy (if from LiveFPL)
+    """
+    from bot_decision_maker import BotDecisionMaker
+
+    try:
+        bot = BotDecisionMaker(BOT_TEAM_ID)
+        await bot.initialize()
+
+        # Try LiveFPL first, fall back to FPL API
+        price_changes = await bot.analyze_price_changes_async()
+        await bot.close()
+
+        return {
+            'rising': price_changes.get('rising', []),
+            'falling': price_changes.get('falling', []),
+            'source': price_changes.get('source', 'fpl_api'),
+            'accuracy': price_changes.get('accuracy', None)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
