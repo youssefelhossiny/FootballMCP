@@ -1,6 +1,6 @@
 import PlayerCard from './PlayerCard'
 
-function TeamFormation({ players, showTransferIndicators = false }) {
+function TeamFormation({ players, showTransferIndicators = false, showPoints = false }) {
   if (!players || players.length === 0) {
     return (
       <div className="bg-slate-800/50 rounded-lg p-8 text-center">
@@ -29,11 +29,17 @@ function TeamFormation({ players, showTransferIndicators = false }) {
       <div
         className="relative py-8 px-4 min-h-[480px]"
         style={{
-          background: 'linear-gradient(to bottom, #1a472a 0%, #2d5a3c 50%, #1a472a 100%)',
+          background: `repeating-linear-gradient(
+            to bottom,
+            #256b32 0px,
+            #256b32 60px,
+            #2a7a3c 60px,
+            #2a7a3c 120px
+          )`,
         }}
       >
         {/* Pitch markings */}
-        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-30">
+        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-40">
           {/* Center line */}
           <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-white/50" />
           {/* Center circle */}
@@ -58,16 +64,16 @@ function TeamFormation({ players, showTransferIndicators = false }) {
         {/* Formation Rows - Based on actual picks */}
         <div className="relative z-10 space-y-4">
           {/* Forwards */}
-          {forwards.length > 0 && <FormationRow players={forwards} showTransferIndicators={showTransferIndicators} />}
+          {forwards.length > 0 && <FormationRow players={forwards} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
 
           {/* Midfielders */}
-          {midfielders.length > 0 && <FormationRow players={midfielders} showTransferIndicators={showTransferIndicators} />}
+          {midfielders.length > 0 && <FormationRow players={midfielders} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
 
           {/* Defenders */}
-          {defenders.length > 0 && <FormationRow players={defenders} showTransferIndicators={showTransferIndicators} />}
+          {defenders.length > 0 && <FormationRow players={defenders} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
 
           {/* Goalkeeper */}
-          {goalkeepers.length > 0 && <FormationRow players={goalkeepers} showTransferIndicators={showTransferIndicators} />}
+          {goalkeepers.length > 0 && <FormationRow players={goalkeepers} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
         </div>
       </div>
 
@@ -83,6 +89,7 @@ function TeamFormation({ players, showTransferIndicators = false }) {
                 isBench
                 showBenchOrder
                 benchOrder={idx}
+                showPoints={showPoints}
               />
             ))}
           </div>
@@ -92,7 +99,7 @@ function TeamFormation({ players, showTransferIndicators = false }) {
   )
 }
 
-function FormationRow({ players, showTransferIndicators = false }) {
+function FormationRow({ players, showTransferIndicators = false, showPoints = false }) {
   if (!players || players.length === 0) return null
 
   return (
@@ -103,6 +110,7 @@ function FormationRow({ players, showTransferIndicators = false }) {
           player={player}
           isTransferIn={showTransferIndicators && player.is_transfer_in}
           isTransferOut={showTransferIndicators && player.is_transfer_out}
+          showPoints={showPoints}
         />
       ))}
     </div>

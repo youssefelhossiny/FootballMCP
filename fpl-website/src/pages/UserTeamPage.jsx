@@ -241,7 +241,10 @@ function UserTeamPage() {
     <div className="space-y-6">
       {/* Header with Team ID Input */}
       <div className="bg-slate-800/50 rounded-lg p-6">
-        <h1 className="text-2xl font-bold text-white mb-4">My FPL Team</h1>
+        <h1 className="text-2xl font-bold text-white mb-2">My FPL Team</h1>
+        <p className="text-slate-400 text-sm mb-4">
+          Load your team to view stats, get personalized AI-powered transfer suggestions via chat, and compare your performance against the bot
+        </p>
         <form onSubmit={handleSubmit} className="flex gap-4">
           <div className="flex-1">
             <label className="block text-slate-400 text-sm mb-1">

@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import PlayerCard from '../components/PlayerCard'
 import TeamFormation from '../components/TeamFormation'
 
 function BotTeamPage() {
@@ -56,7 +55,7 @@ function BotTeamPage() {
         <div>
           <h1 className="text-3xl font-bold text-white">Bot's FPL Team</h1>
           <p className="text-slate-400 mt-1">
-            Autonomous team managed by AI predictions
+            AI-managed team making autonomous transfers, captain picks, and chip decisions based on advanced player stats, fixtures, and price predictions
           </p>
         </div>
         <div className="bg-slate-800 rounded-lg px-6 py-3">
@@ -66,7 +65,7 @@ function BotTeamPage() {
       </div>
 
       {/* Team Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
         <StatCard
           label="Total Points"
           value={botTeam?.total_points || 0}
@@ -78,6 +77,11 @@ function BotTeamPage() {
           icon="⭐"
         />
         <StatCard
+          label="Avg Pts/GW"
+          value={botTeam?.avg_points_per_gw || 0}
+          icon="📈"
+        />
+        <StatCard
           label="Overall Rank"
           value={formatRank(botTeam?.overall_rank)}
           icon="📊"
@@ -87,47 +91,58 @@ function BotTeamPage() {
           value={`£${(botTeam?.team_value / 10 || 100).toFixed(1)}m`}
           icon="💰"
         />
+        <StatCard
+          label="Transfers"
+          value={botTeam?.transfers_this_week || 0}
+          icon="🔄"
+        />
       </div>
 
-      {/* Team Formation */}
-      {botTeam?.players ? (
-        <TeamFormation players={botTeam.players} />
-      ) : (
-        <div className="bg-slate-800/50 rounded-lg p-8 text-center">
-          <p className="text-slate-400">Bot team not configured yet</p>
-          <p className="text-slate-500 text-sm mt-2">
-            Set up bot credentials to enable autonomous management
-          </p>
+      {/* Team Formation + Transfers Side by Side */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
+        {/* Team Formation - Left Side (2 cols) */}
+        <div className="lg:col-span-2">
+          {botTeam?.players ? (
+            <TeamFormation players={botTeam.players} showPoints={true} />
+          ) : (
+            <div className="bg-slate-800/50 rounded-lg p-8 text-center">
+              <p className="text-slate-400">Bot team not configured yet</p>
+              <p className="text-slate-500 text-sm mt-2">
+                Set up bot credentials to enable autonomous management
+              </p>
+            </div>
+          )}
         </div>
-      )}
 
-      {/* Transfer History */}
-      <div className="bg-slate-800/50 rounded-lg p-6">
-        <h2 className="text-xl font-semibold text-white mb-4">Recent Transfers</h2>
-        {botTeam?.transfers?.length > 0 ? (
-          <div className="space-y-2">
-            {botTeam.transfers.map((transfer, idx) => (
-              <div key={idx} className="flex items-center justify-between p-3 bg-slate-700/50 rounded-lg">
-                <div className="flex items-center gap-4">
-                  <span className="text-red-400">{transfer.player_out}</span>
-                  <span className="text-slate-500">→</span>
-                  <span className="text-green-400">{transfer.player_in}</span>
-                </div>
-                <span className="text-slate-400 text-sm">GW {transfer.gameweek}</span>
+        {/* Transfer History - Right Side (1 col) */}
+        <div className="lg:col-span-1 flex flex-col">
+        <div className="bg-slate-800/50 rounded-lg p-6 flex flex-col h-[725px]">
+            <h2 className="text-xl font-semibold text-white mb-4">Recent Transfers</h2>
+            {botTeam?.transfers?.length > 0 ? (
+              <div className="space-y-2 overflow-y-auto flex-1 pr-2">
+                {botTeam.transfers.map((transfer, idx) => (
+                  <div key={idx} className="flex flex-col p-3 bg-slate-700/50 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <span className="text-red-400 text-sm">{transfer.player_out}</span>
+                      <span className="text-slate-500">→</span>
+                      <span className="text-green-400 text-sm">{transfer.player_in}</span>
+                    </div>
+                    <span className="text-slate-400 text-xs mt-1">GW {transfer.gameweek}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            ) : (
+              <p className="text-slate-500">No transfers made yet</p>
+            )}
           </div>
-        ) : (
-          <p className="text-slate-500">No transfers made yet</p>
-        )}
+        </div>
       </div>
 
       {/* Chip Usage */}
       <div className="bg-slate-800/50 rounded-lg p-6">
         <h2 className="text-xl font-semibold text-white mb-4">Chips</h2>
-        <div className="grid grid-cols-4 gap-4">
-          <ChipCard name="Wildcard 1" status={botTeam?.chips?.wildcard1} />
-          <ChipCard name="Wildcard 2" status={botTeam?.chips?.wildcard2} />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <ChipCard name="Wildcard" status={botTeam?.chips?.wildcard2} />
           <ChipCard name="Free Hit" status={botTeam?.chips?.freehit} />
           <ChipCard name="Bench Boost" status={botTeam?.chips?.benchboost} />
           <ChipCard name="Triple Captain" status={botTeam?.chips?.triplecaptain} />

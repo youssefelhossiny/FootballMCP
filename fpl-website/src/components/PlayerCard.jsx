@@ -1,4 +1,4 @@
-function PlayerCard({ player, isBench = false, showBenchOrder = false, benchOrder = null, isTransferOut = false, isTransferIn = false }) {
+function PlayerCard({ player, isBench = false, showBenchOrder = false, benchOrder = null, isTransferOut = false, isTransferIn = false, showPoints = false }) {
   // FPL Team IDs for shirt URLs
   const teamIds = {
     'ARS': 3,
@@ -116,7 +116,7 @@ function PlayerCard({ player, isBench = false, showBenchOrder = false, benchOrde
             {player.web_name || player.name}
           </p>
           <p className="text-[10px] text-slate-400">
-            {fixtureDisplay}
+            {showPoints ? `${player.last_gw_points ?? player.event_points ?? 0} pts` : fixtureDisplay}
           </p>
         </div>
       </div>
