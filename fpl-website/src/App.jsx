@@ -20,7 +20,7 @@ function App() {
             <div className="flex items-center justify-between h-16">
               <div className="flex items-center gap-2">
                 <img
-                  src="https://www.premierleague.com/resources/rebrand/v7/i/elements/pl-main-logo.png"
+                  src="/pl-lion.png"
                   alt="Premier League"
                   className="h-8 w-auto"
                 />
