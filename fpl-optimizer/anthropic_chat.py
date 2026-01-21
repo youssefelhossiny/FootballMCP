@@ -272,19 +272,26 @@ async def query_anthropic(
     try:
         max_iterations = 10  # Allow more iterations for complex multi-tool queries
         iteration = 0
+        current_max_tokens = 1500  # Start with default, increase if truncated
 
         while iteration < max_iterations:
             iteration += 1
-            print(f"[Anthropic] Request iteration {iteration}")
+            print(f"[Anthropic] Request iteration {iteration} (max_tokens={current_max_tokens})")
 
-            # Make API call - Claude 4 is best at parallel tool use
+            # Make API call - Claude Sonnet 4 is best at parallel tool use
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=1500,
+                max_tokens=current_max_tokens,
                 system=SYSTEM_PROMPT,
                 tools=anthropic_tools,
                 messages=messages
             )
+
+            # Handle max_tokens truncation - increase and retry if needed
+            if response.stop_reason == "max_tokens":
+                print(f"[Anthropic] Response truncated at {current_max_tokens} tokens, increasing...")
+                current_max_tokens = min(current_max_tokens * 2, 4096)  # Double up to 4096
+                continue
 
             # Check for tool use
             tool_use_blocks = [

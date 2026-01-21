@@ -259,6 +259,8 @@ function UserTeamPage() {
             />
             <p className="text-slate-500 text-xs mt-1">
               Find your Team ID in your FPL URL: fantasy.premierleague.com/entry/<strong>TEAM_ID</strong>/event/1
+              <br />
+              <span className="text-purple-400">Don't have a team? Try the demo: <strong>8097506</strong></span>
             </p>
           </div>
           <div className="flex items-end">

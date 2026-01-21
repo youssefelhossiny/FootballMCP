@@ -19,7 +19,11 @@ function App() {
           <div className="max-w-7xl mx-auto px-4">
             <div className="flex items-center justify-between h-16">
               <div className="flex items-center gap-2">
-                <span className="text-2xl">⚽</span>
+                <img
+                  src="https://www.premierleague.com/resources/rebrand/v7/i/elements/pl-main-logo.png"
+                  alt="Premier League"
+                  className="h-8 w-auto"
+                />
                 <span className="text-xl font-bold text-white">FPL Optimizer</span>
               </div>
               <div className="flex gap-1">

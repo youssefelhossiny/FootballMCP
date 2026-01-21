@@ -96,7 +96,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_all_players",
-            "description": "Get all Premier League players with stats, prices, and points. Filter by position, team, or price range. Sort by points, form, value, or price.",
+            "description": "Get all Premier League players with comprehensive stats including prices, total points, form, and ownership. Use this tool when the user wants to browse players, find budget options, or search for players by position or team. You can filter by position (GK/DEF/MID/FWD), team name, or price range. Results can be sorted by points, form, value (points per million), or price. Returns up to 50 players with key FPL metrics.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -135,7 +135,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_player_details",
-            "description": "Get detailed stats for a specific player including xG, xA, defensive stats, form, and upcoming fixtures.",
+            "description": "Get comprehensive detailed statistics for a specific player. Returns xG (expected goals), xA (expected assists), defensive contributions, form over last 5 gameweeks, upcoming fixtures with difficulty ratings, price changes, and ownership percentage. Use this when the user asks about a specific player's performance, stats, or whether they should buy/sell them. Essential for deep-diving into individual player analysis.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -152,7 +152,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_fixtures",
-            "description": "Get upcoming Premier League fixtures with FPL difficulty ratings (FDR 1-5).",
+            "description": "Get upcoming Premier League fixtures with FPL Fixture Difficulty Ratings (FDR 1-5, where 1 is easiest and 5 is hardest). Use this to analyze fixture swings, identify good/bad runs of games, and plan transfers around favorable matchups. Can filter by specific team or show all fixtures. Critical for planning transfers and captain picks based on opponent strength.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -173,7 +173,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_my_team",
-            "description": "Get user's current FPL team showing all 15 players, squad breakdown, team value, bank balance, and rank.",
+            "description": "Fetch the user's complete FPL squad including all 15 players (starting XI and bench), current formation, team value, bank balance, overall rank, and gameweek points. Use this when you need to see the user's actual team to make personalized recommendations. The team_id is usually already provided in the context - check there first before asking the user.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -194,7 +194,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_top_players",
-            "description": "Get top performing players by a specific metric including xG, xA, form, value, and defensive stats.",
+            "description": "Get the top performing players ranked by a specific advanced metric. Available metrics: total_points, form, xG, xG_per_90, xA, xA_per_90, value (points per million), def_contributions_per_90, selected_by (ownership), transfers_in, and bonus points. Use this to find the best players in any category, identify differential picks with low ownership, or find undervalued gems. Can filter by position.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -221,7 +221,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "evaluate_transfer",
-            "description": "Evaluate a specific transfer showing points difference, cost analysis, xG comparison, and recommendation (DO IT / WAIT / RECONSIDER).",
+            "description": "Evaluate a specific transfer by comparing player_out vs player_in across multiple metrics: points projection, xG/xA comparison, fixture difficulty, form trends, and price difference. Returns a clear recommendation: DO IT (strong upgrade), WAIT (marginal), or RECONSIDER (downgrade). Use this AFTER suggest_transfers when the user wants to analyze a specific swap, or when they ask 'should I transfer X for Y?'. Always use this to provide data-backed transfer advice.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -246,7 +246,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "optimize_squad",
-            "description": "Build an optimal 15-player FPL squad from scratch using multi-gameweek fixture analysis. Returns starting 11, bench, and expected points.",
+            "description": "Build an optimal 15-player FPL squad from scratch using advanced optimization algorithms and multi-gameweek fixture analysis. Considers budget constraints, FPL rules (max 3 per team), and optimizes for form, points, value, or fixture difficulty. Returns a complete squad with starting XI, bench order, captain pick, and projected points. Use this for Wildcard planning or when users want to see the 'optimal' team they could build.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -272,7 +272,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "analyze_team_fixtures",
-            "description": "Analyze fixture difficulty for all teams. Returns teams ranked by fixture easiness with FDR ratings.",
+            "description": "Analyze and rank all Premier League teams by their upcoming fixture difficulty. Returns teams sorted from easiest to hardest fixtures with average FDR scores. Use this to identify which teams have favorable fixture runs (target their players) and which have tough schedules (avoid or sell). Essential for planning transfers around fixture swings and identifying teams to target.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -289,7 +289,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "optimize_lineup",
-            "description": "Select the best starting 11 from a user's 15-player squad using ML predictions. Returns formation, captain pick, and expected points.",
+            "description": "Select the optimal starting 11 from a user's 15-player squad using ML-based point predictions. Analyzes each player's expected points based on form, fixtures, and historical data to determine the best formation and bench order. Returns recommended starting XI, bench order, optimal formation (e.g., 3-4-3, 4-4-2), and captain/vice-captain picks. Use this when users ask 'who should I start?' or 'what's my best lineup?'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -310,7 +310,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "suggest_captain",
-            "description": "Data-driven captain recommendation considering form, fixtures, xG, and opponent strength. Returns top 3 captain options.",
+            "description": "Generate data-driven captain recommendations for the user's squad. Analyzes form, upcoming fixture difficulty, xG/xA stats, historical performance against opponent, and home/away splits. Returns top 3 captain options ranked by expected points with detailed reasoning for each pick. Use this whenever the user asks about captain choices or who to captain this gameweek.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -331,7 +331,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "suggest_transfers",
-            "description": "Get transfer recommendations based on the user's team. Analyzes form, fixtures, injuries, and price changes.",
+            "description": "Generate personalized transfer recommendations based on the user's current squad. Identifies underperforming players to sell and suggests optimal replacements considering: budget constraints, fixture difficulty, form trends, injury risks, and price changes. Returns prioritized transfer targets with reasoning. Use this when users ask 'who should I transfer?' or 'what transfers should I make?'. Can filter by position or price range.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -357,7 +357,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "compare_players",
-            "description": "Compare two or more players side by side on key metrics including price, points, form, xG, xA, and ownership.",
+            "description": "Compare 2-4 players side-by-side across all key FPL metrics: price, total points, form, xG, xA, xG per 90, xA per 90, minutes played, ownership percentage, and upcoming fixtures. Use this when users ask 'should I get X or Y?' or 'compare Palmer vs Saka'. Provides a clear visual comparison to help with transfer decisions between similar-priced or same-position players.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -375,7 +375,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_chip_strategy",
-            "description": "Strategic recommendations for when to use FPL chips (Wildcard, Bench Boost, Triple Captain, Free Hit) based on upcoming fixtures.",
+            "description": "Get strategic recommendations for when to use FPL chips: Wildcard (unlimited free transfers), Bench Boost (bench players score), Triple Captain (3x captain points), and Free Hit (one-week unlimited transfers). Analyzes upcoming fixtures, blank/double gameweeks, and team state to suggest optimal chip timing. Use this when users ask 'when should I use my wildcard?' or 'is this a good week for bench boost?'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -393,7 +393,7 @@ FPL_TOOLS = [
         "type": "function",
         "function": {
             "name": "make_transfer",
-            "description": "Execute a transfer in the theoretical lineup - swap a player OUT from the user's team for a player IN. Use this when the user agrees to a transfer or asks to replace a specific player. The frontend will visually update the theoretical squad.",
+            "description": "Execute a transfer in the theoretical lineup by swapping player_out for player_in. This updates the visual squad display in the frontend WITHOUT making actual FPL transfers. Use this when: 1) User explicitly agrees to a suggested transfer, 2) User asks to 'replace X with Y' or 'swap X for Y', 3) User says 'do it' or 'make that transfer' after a suggestion. Always include a brief reason. The frontend will show the updated theoretical squad.",
             "parameters": {
                 "type": "object",
                 "properties": {
