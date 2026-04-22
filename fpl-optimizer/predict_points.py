@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 FPL Linear Programming Squad Optimizer
-Phase 4.1: Understat xG/xA + FBRef defensive/progressive stats + Recoveries
+Phase 4.1: Understat xG/xA + FBRef defensive/progressive stats
 
 Features:
 - 17 FPL base features
 - 16 Understat features (xG, xA, npxG, xGChain, xGBuildup + per-90s + overperformance)
 - 4 derived Understat features
-- 21 FBRef features (defensive, progressive, creation)
-- 3 new FBRef misc features (recoveries, predicted DC)
+- 24 FBRef features (defensive, progressive, creation)
 Total: 61 features
 """
 
@@ -71,13 +70,11 @@ class FPLPointsPredictor:
             'progressive_passes', 'progressive_carries', 'progressive_receptions',
             'progressive_passes_per_90', 'progressive_carries_per_90', 'progressive_receptions_per_90',
             # FBRef Possession/Creation features (6)
-            'touches', 'touches_att_3rd', 'sca', 'gca', 'sca_per_90', 'gca_per_90',
-            # FBRef Recoveries (2) - critical for MID/FWD DC prediction
-            'fbref_recoveries', 'fbref_recoveries_per_90',
-            # Predicted DC features (1) - combined prediction for DC points
-            'predicted_dc_per_90'
+            'touches', 'touches_att_3rd', 'sca', 'gca', 'sca_per_90', 'gca_per_90'
         ]
-        # Total: 61 features (17 FPL + 16 Understat + 4 derived + 21 FBRef + 3 recoveries/DC)
+        # Total: 61 features (17 FPL + 16 Understat + 4 derived + 24 FBRef)
+        # Note: fbref_recoveries, fbref_recoveries_per_90, predicted_dc_per_90 removed
+        # because they weren't in the trained model. Retrain model to add them back.
 
     def load_model(self):
         """Load trained model from disk"""
@@ -171,12 +168,9 @@ class FPLPointsPredictor:
                 'sca': int(p.get('sca', 0)),
                 'gca': int(p.get('gca', 0)),
                 'sca_per_90': float(p.get('sca_per_90', 0.0)),
-                'gca_per_90': float(p.get('gca_per_90', 0.0)),
-                # FBRef Recoveries (for MID/FWD DC prediction)
-                'fbref_recoveries': int(p.get('fbref_recoveries', 0)),
-                'fbref_recoveries_per_90': float(p.get('fbref_recoveries_per_90', 0.0)),
-                # Predicted DC (combined: base + recoveries for MID/FWD)
-                'predicted_dc_per_90': float(p.get('predicted_dc_per_90', 0.0))
+                'gca_per_90': float(p.get('gca_per_90', 0.0))
+                # Note: fbref_recoveries, fbref_recoveries_per_90, predicted_dc_per_90 removed
+                # because they weren't in the trained model
             }
             features.append(row)
 
