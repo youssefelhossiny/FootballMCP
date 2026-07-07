@@ -1,15 +1,24 @@
-# FootballMCP - Complete Football Intelligence Suite
+# Football-MCP — Football Intelligence Suite
 
-> **Two powerful MCP servers** for soccer analytics and Fantasy Premier League optimization
+> AI-powered soccer analytics and Fantasy Premier League optimization,
+> available as **MCP servers** *and* a **full-stack web app**.
 
 ## 🎯 What This Project Does
 
-**FootballMCP** provides AI-powered football intelligence through two specialized MCP servers:
+**Football-MCP** provides football intelligence through two specialized MCP
+servers, plus a React web app that surfaces the FPL tools over a REST API:
 
 1. **⚽ Soccer Stats Server** - Match predictions, live scores, league standings
 2. **🏆 FPL Optimizer Server** - Fantasy Premier League team optimization and analysis
+3. **🌐 FPL Website** - React 19 frontend + FastAPI backend (chat, team viewer,
+   transfer suggestions, autonomous "bot team")
 
-Both servers can be used together or independently with any MCP-compatible LLM client (Claude Desktop, Perplexity, etc.).
+The MCP servers work with any MCP-compatible LLM client (Claude Desktop, etc.).
+The FPL optimizer's ML pipeline now runs on **58 engineered features** merged
+from the FPL API, Understat (xG/xA), and FBRef (defensive/progressive stats).
+
+> 📄 For the current architecture, ML pipeline details, and roadmap, see
+> **[PROJECT_STATUS.md](PROJECT_STATUS.md)**.
 
 ---
 
@@ -51,18 +60,15 @@ Both servers can be used together or independently with any MCP-compatible LLM c
 - Transfer recommendations
 - Captain selection advice
 
-### Current Tools (Phase 1 Complete ✅)
+### Tools (~12, all live)
 - `get_all_players` - Filter & sort all PL players
-- `get_player_details` - Deep player statistics
-- `get_fixtures` - Upcoming matches with difficulty
-- `get_my_team` - View your FPL squad
+- `get_player_details` - Deep player statistics (incl. xG/xA + defensive stats)
 - `get_top_performers` - Top players by any metric
-
-### Coming Soon (Phase 2)
-- `optimize_squad` - Build optimal 15-player team
-- `suggest_transfers` - Smart transfer suggestions
+- `optimize_squad_lp` - Build optimal 15-player team (Linear Programming)
+- `evaluate_transfer` / `suggest_transfers` - Transfer analysis & suggestions
 - `suggest_captain` - Data-driven captain picks
-- ML-powered points prediction
+- `suggest_chips_strategy` - Chip timing advice
+- ML-powered points prediction (Random Forest, 58 features)
 
 ### Data Source
 - **Official FPL API** (no API key needed!)
@@ -175,65 +181,41 @@ Add to your MCP client config (e.g., Claude Desktop):
 ## 📁 Project Structure
 
 ```
-FootballMCP/
+Football-MCP/
 ├── README.md                    # This file
-├── .env                         # API keys (create this)
-├── .venv/                       # Python virtual environment
-├── models/                      # Shared ML models
+├── PROJECT_STATUS.md            # Current architecture, ML pipeline, roadmap
+├── start_website.sh             # Launch backend (:8000) + frontend (:3000)
+├── .env                         # API keys (create this — not tracked)
+├── models/                      # Trained ML models (.pkl) + feature lists
 │
-├── soccer-stats/                # Server 1: Soccer Stats
+├── soccer-stats/                # Soccer Stats MCP server
 │   ├── Server.py                # Main MCP server
 │   ├── collect_training_data.py # ML data collection
 │   ├── train_model.py           # Train ML models
-│   ├── test_api.py              # API connection test
-│   ├── test_predictions.py      # Test ML predictions
-│   ├── requirements.txt
-│   ├── README.md
-│   └── Tool_usage_guide.md
+│   ├── README.md / Tool_usage_guide.md
 │
-└── fpl-optimizer/               # Server 2: FPL Optimizer
-    ├── Server.py                # Main MCP server
-    ├── test_fpl_api.py          # API connection test
-    ├── test_tools.py            # Test all tools
-    ├── requirements.txt
-    ├── README.md
-    └── SETUP.md
+├── fpl-optimizer/               # FPL MCP server + FastAPI backend
+│   ├── Server.py                # MCP server (~12 tools)
+│   ├── api_server.py            # FastAPI REST API for the website
+│   ├── enhanced_features.py     # FPL + Understat + FBRef → 58 features
+│   ├── predict_points.py        # Random Forest predictor
+│   ├── data_sources/            # scrapers + cache
+│   ├── player_mapping/          # fuzzy name matching
+│   ├── README.md / SETUP.md
+│
+└── fpl-website/                 # React 19 + Vite 7 + Tailwind 4 frontend
 ```
 
 ---
 
 ## 🔧 Development Status
 
-### ✅ Completed
+The FPL optimizer is production-ready: squad optimization (Linear Programming),
+transfer/captain/chip advice, and ML points prediction on 58 features are all
+live, powering both the MCP server and the web app.
 
-**Soccer Stats Server:**
-- ✅ Real-time match data
-- ✅ League standings
-- ✅ Team analysis
-- ✅ ML predictions (basic)
-- ✅ Top scorers
-
-**FPL Optimizer Server (Phase 1):**
-- ✅ Player filtering & sorting
-- ✅ Detailed player stats
-- ✅ Fixture analysis
-- ✅ Team viewing
-- ✅ Performance metrics
-
-### 🚧 In Progress / Planned
-
-**Soccer Stats Improvements:**
-- 🔄 Better ML training data
-- 🔄 Improved prediction accuracy
-- 📅 More competitions (La Liga, Serie A)
-- 📅 Advanced statistics (xG, xA)
-
-**FPL Optimizer (Phase 2):**
-- 📅 Squad optimization (Linear Programming)
-- 📅 Transfer recommendations
-- 📅 Captain suggestions
-- 📅 ML points prediction
-- 📅 Chip strategy advice
+See **[PROJECT_STATUS.md](PROJECT_STATUS.md)** for the current ML pipeline,
+feature breakdown, and roadmap.
 
 ---
 
