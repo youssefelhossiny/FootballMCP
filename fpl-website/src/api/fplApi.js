@@ -44,6 +44,8 @@ export const playersAPI = {
     if (filters.position) params.append('position', filters.position)
     if (filters.minPrice) params.append('min_price', filters.minPrice)
     if (filters.maxPrice) params.append('max_price', filters.maxPrice)
+    if (filters.team) params.append('team', filters.team)
+    if (filters.limit) params.append('limit', filters.limit)
 
     const query = params.toString()
     return fetchAPI(`/players${query ? `?${query}` : ''}`)

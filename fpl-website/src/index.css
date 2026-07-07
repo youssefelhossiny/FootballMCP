@@ -1,13 +1,94 @@
 @import "tailwindcss";
 
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  /* Color tokens — deep navy base with emerald accent */
+  --bg-base: #0a0f1a;
+  --bg-surface: #111827;
+  --bg-elevated: #1a2333;
+  --bg-card: #151c2b;
+  --border-subtle: #1f2937;
+  --border-default: #2d3748;
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --accent-primary: #10b981;     /* emerald */
+  --accent-primary-hover: #059669;
+  --accent-primary-soft: rgba(16, 185, 129, 0.12);
+  --accent-primary-ring: rgba(16, 185, 129, 0.35);
+
+  --accent-warn: #f59e0b;
+  --accent-danger: #ef4444;
+  --accent-info: #3b82f6;
+
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* Typography */
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   line-height: 1.5;
   font-weight: 400;
+  color-scheme: dark;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Monospace for numbers */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* Utility classes that map to tokens — usable alongside Tailwind */
+.surface { background: var(--bg-surface); }
+.surface-elevated { background: var(--bg-elevated); }
+.surface-card { background: var(--bg-card); }
+.border-subtle { border-color: var(--border-subtle); }
+.border-default { border-color: var(--border-default); }
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+.text-accent { color: var(--accent-primary); }
+.bg-accent { background: var(--accent-primary); }
+.bg-accent-soft { background: var(--accent-primary-soft); }
+.ring-accent { box-shadow: 0 0 0 2px var(--accent-primary-ring); }
+
+/* Card base */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Subtle hover lift */
+.lift { transition: transform 150ms ease, box-shadow 150ms ease; }
+.lift:hover { transform: translateY(-2px); box-shadow: var(--shadow-card-hover); }
+
+/* Pitch stripes */
+.pitch-bg {
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      #1a4d2e 0px,
+      #1a4d2e 48px,
+      #1e5a36 48px,
+      #1e5a36 96px
+    );
 }

@@ -1,136 +1,141 @@
-function PlayerCard({ player, isBench = false, showBenchOrder = false, benchOrder = null, isTransferOut = false, isTransferIn = false, showPoints = false }) {
-  // FPL Team IDs for shirt URLs
+function PlayerCard({
+  player,
+  isBench = false,
+  showBenchOrder = false,
+  benchOrder = null,
+  isTransferOut = false,
+  isTransferIn = false,
+  isSelectedForSwap = false,
+  showPoints = false,
+  onClick,
+}) {
   const teamIds = {
-    'ARS': 3,
-    'AVL': 7,
-    'BOU': 91,
-    'BRE': 94,
-    'BHA': 36,
-    'BUR': 90,
-    'CHE': 8,
-    'CRY': 31,
-    'EVE': 11,
-    'FUL': 54,
-    'IPS': 40,
-    'LEI': 13,
-    'LIV': 14,
-    'MCI': 43,
-    'MUN': 1,
-    'NEW': 4,
-    'NFO': 17,
-    'SOU': 20,
-    'SUN': 56,
-    'TOT': 6,
-    'WHU': 21,
-    'WOL': 39,
-    'LEE': 2,
-    'LUT': 95,
+    'ARS': 3, 'AVL': 7, 'BOU': 91, 'BRE': 94, 'BHA': 36, 'BUR': 90,
+    'CHE': 8, 'CRY': 31, 'EVE': 11, 'FUL': 54, 'IPS': 40, 'LEI': 13,
+    'LIV': 14, 'MCI': 43, 'MUN': 1, 'NEW': 4, 'NFO': 17, 'SOU': 20,
+    'SUN': 56, 'TOT': 6, 'WHU': 21, 'WOL': 39, 'LEE': 2, 'LUT': 95,
   }
 
-  // Get team ID - prefer team_code from API, fallback to lookup table
   const teamId = player.team_code || teamIds[player.team] || 0
-
-  // Build shirt URL - use png format which is more reliable
-  const isGoalkeeper = player.position === 1 || player.element_type === 1
+  const isGoalkeeper = player.position === 1 || player.element_type === 1 || player.position === 'GKP' || player.position === 'GK'
   const shirtUrl = isGoalkeeper
     ? `https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_${teamId}_1-110.png`
     : `https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_${teamId}-110.png`
 
-  // Position names for bench labels
   const positionNames = { 1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD' }
-
-  // Get fixture info - format: OPP (H) or OPP (A)
   const fixture = player.next_fixture || player.fixture || ''
-  const fixtureDisplay = fixture ? `${fixture}` : `${player.team}`
+  const fixtureDisplay = fixture || player.team
 
-  // Format price - now_cost is always in tenths (e.g., 78 = £7.8m, 149 = £14.9m)
-  const rawPrice = player.now_cost || player.price || 0
-  const price = (rawPrice / 10).toFixed(1)
+  // Price — now_cost is tenths (141 = £14.1m); price is decimal (14.1)
+  const rawPrice = player.now_cost || (player.price ? player.price * 10 : 0)
+  const priceDisplay = (rawPrice / 10).toFixed(1)
+
+  const clickable = !!onClick && !isBench
 
   return (
-    <div className={`flex flex-col items-center ${isBench ? 'w-[85px]' : 'w-[90px]'}`}>
-      {/* Bench order label */}
+    <div className={`flex flex-col items-center ${isBench ? 'w-[82px]' : 'w-[88px]'}`}>
       {showBenchOrder && benchOrder !== null && (
-        <div className="text-[10px] text-slate-300 mb-1 bg-slate-700/80 px-2 py-0.5 rounded">
+        <div className="text-[9px] text-white/70 mb-0.5 px-1.5 py-0.5 rounded" style={{ background: 'rgba(0,0,0,0.35)' }}>
           {benchOrder}. {positionNames[player.position]}
         </div>
       )}
 
-      {/* Player Card */}
-      <div className={`relative flex flex-col items-center ${isTransferOut ? 'opacity-50' : ''}`}>
-        {/* Price badge - top of card like FPL */}
-        <div className={`absolute -top-2 left-1/2 -translate-x-1/2 z-20 px-1.5 py-0.5 rounded text-[9px] font-bold shadow-md ${
-          isTransferIn ? 'bg-green-500 text-white' : isTransferOut ? 'bg-red-500 text-white' : 'bg-purple-600 text-white'
-        }`}>
-          £{price}m
+      <button
+        type="button"
+        onClick={clickable ? onClick : undefined}
+        disabled={!clickable}
+        className={`relative flex flex-col items-center ${clickable ? 'cursor-pointer' : 'cursor-default'} ${isTransferOut ? 'opacity-40' : ''} transition-transform`}
+        style={{
+          transform: isSelectedForSwap ? 'translateY(-4px)' : undefined,
+        }}
+      >
+        {/* Price badge */}
+        <div
+          className="absolute -top-1.5 left-1/2 -translate-x-1/2 z-20 px-1.5 py-[1px] rounded num text-[10px] font-bold"
+          style={{
+            background: isTransferIn ? 'var(--accent-primary)'
+              : isTransferOut ? 'var(--accent-danger)'
+              : isSelectedForSwap ? 'var(--accent-warn)'
+              : 'rgba(15, 23, 42, 0.95)',
+            color: 'white',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+          }}
+        >
+          £{priceDisplay}m
         </div>
 
-        {/* Status indicator (injury/doubt) */}
+        {/* Status indicator */}
         {player.status && player.status !== 'a' && (
-          <div className="absolute top-4 left-0 z-10">
-            <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shadow-md ${getStatusStyle(player.status)}`}>
-              {getStatusIcon(player.status)}
-            </span>
-          </div>
+          <span
+            className="absolute top-3 left-0 z-10 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
+            style={getStatusStyle(player.status)}
+          >
+            {getStatusIcon(player.status)}
+          </span>
         )}
 
-        {/* Captain/Vice badge */}
+        {/* Captain / Vice */}
         {player.is_captain && (
-          <div className="absolute top-4 right-0 z-10">
-            <span className="bg-black text-yellow-400 text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold border-2 border-yellow-400 shadow-md">C</span>
-          </div>
+          <span className="absolute top-3 right-0 z-10 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold" style={{ background: 'black', color: '#facc15', border: '1.5px solid #facc15' }}>C</span>
         )}
         {player.is_vice_captain && !player.is_captain && (
-          <div className="absolute top-4 right-0 z-10">
-            <span className="bg-black text-slate-300 text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold border-2 border-slate-400 shadow-md">V</span>
-          </div>
+          <span className="absolute top-3 right-0 z-10 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold" style={{ background: 'black', color: '#cbd5e1', border: '1.5px solid #94a3b8' }}>V</span>
         )}
 
-        {/* Transfer indicator */}
+        {/* Transfer / swap indicators */}
         {isTransferOut && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30">
-            <span className="text-red-500 text-2xl font-bold">✕</span>
+            <span className="text-red-400 text-2xl font-bold drop-shadow">✕</span>
           </div>
         )}
         {isTransferIn && (
           <div className="absolute -top-1 -right-1 z-30">
-            <span className="bg-green-500 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold shadow-md">+</span>
+            <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold text-white" style={{ background: 'var(--accent-primary)' }}>+</span>
           </div>
         )}
 
-        {/* Jersey Image */}
-        <div className="w-16 h-16 flex items-center justify-center mt-2">
+        {/* Selected-for-swap ring */}
+        {isSelectedForSwap && (
+          <div className="absolute inset-0 -inset-x-1 z-0 rounded-lg pointer-events-none" style={{ boxShadow: '0 0 0 2px var(--accent-warn)', borderRadius: '10px' }} />
+        )}
+
+        {/* Jersey */}
+        <div className="w-14 h-14 flex items-center justify-center mt-1.5">
           <img
             src={shirtUrl}
             alt={player.team}
-            className="w-14 h-14 object-contain drop-shadow-lg"
-            onError={(e) => {
-              e.target.src = 'https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_0-110.png'
-            }}
+            className="w-12 h-12 object-contain drop-shadow-lg"
+            onError={(e) => { e.target.src = 'https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_0-110.png' }}
           />
         </div>
 
-        {/* Name Label */}
-        <div className="bg-slate-800 text-white px-2 py-1 rounded-md text-center min-w-[75px] shadow-md -mt-1">
-          <p className="text-[11px] font-semibold truncate leading-tight">
+        {/* Name label */}
+        <div
+          className="px-1.5 py-0.5 rounded-md text-center min-w-[70px] -mt-0.5"
+          style={{
+            background: 'rgba(10, 15, 26, 0.92)',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}
+        >
+          <p className="text-[11px] font-semibold truncate leading-tight text-white">
             {player.web_name || player.name}
           </p>
-          <p className="text-[10px] text-slate-400">
+          <p className="text-[9px] text-slate-400 num">
             {showPoints ? `${player.last_gw_points ?? player.event_points ?? 0} pts` : fixtureDisplay}
           </p>
         </div>
-      </div>
+      </button>
     </div>
   )
 }
 
 function getStatusStyle(status) {
   switch (status) {
-    case 'i': return 'bg-red-500 text-white'
-    case 'd': return 'bg-yellow-500 text-black'
-    case 's': return 'bg-orange-500 text-white'
-    case 'u': return 'bg-red-600 text-white'
-    default: return 'bg-slate-500 text-white'
+    case 'i': return { background: 'var(--accent-danger)', color: 'white' }
+    case 'd': return { background: 'var(--accent-warn)', color: '#1a1a1a' }
+    case 's': return { background: '#f97316', color: 'white' }
+    case 'u': return { background: '#991b1b', color: 'white' }
+    default: return { background: 'var(--text-muted)', color: 'white' }
   }
 }
 

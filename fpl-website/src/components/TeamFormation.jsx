@@ -1,86 +1,68 @@
 import PlayerCard from './PlayerCard'
 
-function TeamFormation({ players, showTransferIndicators = false, showPoints = false }) {
+function TeamFormation({
+  players,
+  showTransferIndicators = false,
+  showPoints = false,
+  selectedOutId = null,
+  onSelectOut,
+}) {
   if (!players || players.length === 0) {
     return (
-      <div className="bg-slate-800/50 rounded-lg p-8 text-center">
-        <p className="text-slate-400">No players to display</p>
+      <div className="card p-8 text-center">
+        <p className="text-muted">No players to display</p>
       </div>
     )
   }
 
-  // Separate starters and bench based on is_bench flag (from actual GW picks)
   const starters = players.filter(p => !p.is_bench)
   const bench = players.filter(p => p.is_bench).sort((a, b) => (a.bench_order || 0) - (b.bench_order || 0))
 
-  // Group starters by position for display (handle both numeric and string positions)
   const getPositionType = (p) => p.element_type || p.position
-  const goalkeepers = starters.filter(p => getPositionType(p) === 1 || p.position === 'GKP')
-  const defenders = starters.filter(p => getPositionType(p) === 2 || p.position === 'DEF')
-  const midfielders = starters.filter(p => getPositionType(p) === 3 || p.position === 'MID')
-  const forwards = starters.filter(p => getPositionType(p) === 4 || p.position === 'FWD')
+  const gks = starters.filter(p => getPositionType(p) === 1 || p.position === 'GKP' || p.position === 'GK')
+  const defs = starters.filter(p => getPositionType(p) === 2 || p.position === 'DEF')
+  const mids = starters.filter(p => getPositionType(p) === 3 || p.position === 'MID')
+  const fwds = starters.filter(p => getPositionType(p) === 4 || p.position === 'FWD')
 
-  // Determine formation string (e.g., "3-5-2")
-  const formation = `${defenders.length}-${midfielders.length}-${forwards.length}`
+  const formation = `${defs.length}-${mids.length}-${fwds.length}`
+
+  const handleClick = (player) => {
+    if (onSelectOut) onSelectOut(player)
+  }
 
   return (
-    <div className="rounded-lg overflow-hidden">
+    <div className="card overflow-hidden">
       {/* Pitch */}
-      <div
-        className="relative py-8 px-4 min-h-[480px]"
-        style={{
-          background: `repeating-linear-gradient(
-            to bottom,
-            #256b32 0px,
-            #256b32 60px,
-            #2a7a3c 60px,
-            #2a7a3c 120px
-          )`,
-        }}
-      >
+      <div className="relative pitch-bg py-6 px-4 min-h-[480px]">
         {/* Pitch markings */}
-        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-40">
-          {/* Center line */}
-          <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-white/50" />
-          {/* Center circle */}
-          <div className="absolute top-1/2 left-1/2 w-24 h-24 border-2 border-white/50 rounded-full -translate-x-1/2 -translate-y-1/2" />
-          {/* Center dot */}
-          <div className="absolute top-1/2 left-1/2 w-2 h-2 bg-white/50 rounded-full -translate-x-1/2 -translate-y-1/2" />
-          {/* Top penalty area */}
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-20 border-2 border-t-0 border-white/50" />
-          {/* Top goal area */}
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-24 h-8 border-2 border-t-0 border-white/50" />
-          {/* Bottom penalty area */}
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-48 h-20 border-2 border-b-0 border-white/50" />
-          {/* Bottom goal area */}
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-24 h-8 border-2 border-b-0 border-white/50" />
+        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-30">
+          <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-white/60" />
+          <div className="absolute top-1/2 left-1/2 w-24 h-24 border-2 border-white/60 rounded-full -translate-x-1/2 -translate-y-1/2" />
+          <div className="absolute top-1/2 left-1/2 w-2 h-2 bg-white/60 rounded-full -translate-x-1/2 -translate-y-1/2" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-20 border-2 border-t-0 border-white/60" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-24 h-8 border-2 border-t-0 border-white/60" />
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-48 h-20 border-2 border-b-0 border-white/60" />
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-24 h-8 border-2 border-b-0 border-white/60" />
         </div>
 
-        {/* Formation display */}
-        <div className="absolute top-2 right-3 text-white/60 text-xs font-medium">
+        {/* Formation label */}
+        <div className="absolute top-2 right-3 z-10 text-white/70 text-[11px] font-semibold num px-2 py-0.5 rounded" style={{ background: 'rgba(0,0,0,0.35)' }}>
           {formation}
         </div>
 
-        {/* Formation Rows - Based on actual picks */}
-        <div className="relative z-10 space-y-4">
-          {/* Forwards */}
-          {forwards.length > 0 && <FormationRow players={forwards} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
-
-          {/* Midfielders */}
-          {midfielders.length > 0 && <FormationRow players={midfielders} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
-
-          {/* Defenders */}
-          {defenders.length > 0 && <FormationRow players={defenders} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
-
-          {/* Goalkeeper */}
-          {goalkeepers.length > 0 && <FormationRow players={goalkeepers} showTransferIndicators={showTransferIndicators} showPoints={showPoints} />}
+        {/* Rows */}
+        <div className="relative z-10 flex flex-col justify-between h-full min-h-[440px]">
+          <Row players={fwds} {...{ showTransferIndicators, showPoints, selectedOutId, onClick: handleClick }} />
+          <Row players={mids} {...{ showTransferIndicators, showPoints, selectedOutId, onClick: handleClick }} />
+          <Row players={defs} {...{ showTransferIndicators, showPoints, selectedOutId, onClick: handleClick }} />
+          <Row players={gks} {...{ showTransferIndicators, showPoints, selectedOutId, onClick: handleClick }} />
         </div>
       </div>
 
-      {/* Substitutes Section */}
+      {/* Bench */}
       {bench.length > 0 && (
-        <div className="bg-slate-800/80 py-4 px-4">
-          <p className="text-white text-center text-sm font-medium mb-3">Substitutes</p>
+        <div className="py-4 px-4" style={{ background: 'var(--bg-elevated)' }}>
+          <p className="text-center text-[11px] uppercase tracking-wider text-muted font-semibold mb-3">Bench</p>
           <div className="flex justify-center gap-3">
             {bench.map((player, idx) => (
               <PlayerCard
@@ -90,6 +72,8 @@ function TeamFormation({ players, showTransferIndicators = false, showPoints = f
                 showBenchOrder
                 benchOrder={idx}
                 showPoints={showPoints}
+                isSelectedForSwap={selectedOutId === player.id}
+                onClick={onSelectOut ? () => onSelectOut(player) : undefined}
               />
             ))}
           </div>
@@ -99,18 +83,19 @@ function TeamFormation({ players, showTransferIndicators = false, showPoints = f
   )
 }
 
-function FormationRow({ players, showTransferIndicators = false, showPoints = false }) {
+function Row({ players, showTransferIndicators, showPoints, selectedOutId, onClick }) {
   if (!players || players.length === 0) return null
-
   return (
     <div className="flex justify-center gap-2">
-      {players.map((player) => (
+      {players.map(p => (
         <PlayerCard
-          key={player.id}
-          player={player}
-          isTransferIn={showTransferIndicators && player.is_transfer_in}
-          isTransferOut={showTransferIndicators && player.is_transfer_out}
+          key={p.id}
+          player={p}
+          isTransferIn={showTransferIndicators && p.is_transfer_in}
+          isTransferOut={showTransferIndicators && p.is_transfer_out}
+          isSelectedForSwap={selectedOutId === p.id}
           showPoints={showPoints}
+          onClick={() => onClick?.(p)}
         />
       ))}
     </div>

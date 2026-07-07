@@ -2,62 +2,30 @@ import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-do
 import BotTeamPage from './pages/BotTeamPage'
 import UserTeamPage from './pages/UserTeamPage'
 
-/* ORIGINAL COLORS (to revert):
-   - Main bg: bg-gradient-to-br from-purple-900 via-indigo-900 to-slate-900
-   - Nav bg: bg-slate-800/50 border-b border-slate-700
-   - Active nav: bg-purple-600 text-white
-   - Inactive nav: text-slate-300 hover:bg-slate-700
-*/
-
 function App() {
   return (
     <Router>
-      {/* Main container */}
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-indigo-900 to-slate-900">
-        {/* Navigation */}
-        <nav className="bg-slate-800/50 border-b border-slate-700">
-          <div className="max-w-7xl mx-auto px-4">
-            <div className="flex items-center justify-between h-16">
-              <div className="flex items-center gap-2">
-                <img
-                  src="/pl-lion.png"
-                  alt="Premier League"
-                  className="h-8 w-auto"
-                />
-                <span className="text-xl font-bold text-white">FPL Optimizer</span>
+      <div className="min-h-screen" style={{ background: 'var(--bg-base)' }}>
+        {/* Top nav */}
+        <nav className="sticky top-0 z-40 backdrop-blur-md" style={{ background: 'rgba(10, 15, 26, 0.85)', borderBottom: '1px solid var(--border-subtle)' }}>
+          <div className="max-w-[1600px] mx-auto px-6">
+            <div className="flex items-center justify-between h-14">
+              <div className="flex items-center gap-3">
+                <img src="/pl-lion.png" alt="Premier League" className="h-7 w-auto" />
+                <div>
+                  <div className="text-[15px] font-semibold text-primary leading-tight">FPL Optimizer</div>
+                  <div className="text-[10px] text-muted leading-tight uppercase tracking-wider">AI transfer assistant</div>
+                </div>
               </div>
               <div className="flex gap-1">
-                <NavLink
-                  to="/"
-                  className={({ isActive }) =>
-                    `px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                      isActive
-                        ? 'bg-purple-600 text-white'
-                        : 'text-slate-300 hover:bg-slate-700'
-                    }`
-                  }
-                >
-                  Bot's Team
-                </NavLink>
-                <NavLink
-                  to="/my-team"
-                  className={({ isActive }) =>
-                    `px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                      isActive
-                        ? 'bg-purple-600 text-white'
-                        : 'text-slate-300 hover:bg-slate-700'
-                    }`
-                  }
-                >
-                  My Team
-                </NavLink>
+                <NavItem to="/">Bot's Team</NavItem>
+                <NavItem to="/my-team">My Team</NavItem>
               </div>
             </div>
           </div>
         </nav>
 
-        {/* Main Content */}
-        <main className="max-w-7xl mx-auto px-4 py-8">
+        <main className="max-w-[1600px] mx-auto px-6 py-6">
           <Routes>
             <Route path="/" element={<BotTeamPage />} />
             <Route path="/my-team" element={<UserTeamPage />} />
@@ -65,6 +33,27 @@ function App() {
         </main>
       </div>
     </Router>
+  )
+}
+
+function NavItem({ to, children }) {
+  return (
+    <NavLink
+      to={to}
+      end={to === '/'}
+      className={({ isActive }) =>
+        `px-3.5 py-1.5 rounded-md text-sm font-medium transition-colors ${
+          isActive
+            ? 'text-white'
+            : 'text-secondary hover:text-primary'
+        }`
+      }
+      style={({ isActive }) =>
+        isActive ? { background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' } : {}
+      }
+    >
+      {children}
+    </NavLink>
   )
 }
 
