@@ -107,6 +107,32 @@ export const chatAPI = {
 }
 
 /**
+ * Player detail (name-based) — powers the player profile slide-over.
+ */
+export const playerDetailAPI = {
+  getByName: (name) => fetchAPI(`/player/${encodeURIComponent(name)}`)
+}
+
+/**
+ * Bot endpoints (Stats page)
+ */
+export const botAPI = {
+  getTeam: () => fetchAPI('/bot/team'),
+  getDecision: () => fetchAPI('/bot/decision'),
+  getPriceChanges: () => fetchAPI('/bot/price-changes')
+}
+
+/**
+ * Season history — per-GW series for the Stats page.
+ * Returns { gw, user, bot, avg, rankUser, rankBot, bench } aligned by gameweek.
+ * `teamId` may be null (returns bot + field average only).
+ */
+export const historyAPI = {
+  getSeries: (teamId) =>
+    fetchAPI(`/history${teamId ? `/${teamId}` : ''}`)
+}
+
+/**
  * Health check
  */
 export const healthAPI = {
@@ -115,7 +141,10 @@ export const healthAPI = {
 
 export default {
   players: playersAPI,
+  playerDetail: playerDetailAPI,
   team: teamAPI,
+  bot: botAPI,
+  history: historyAPI,
   optimal: optimalAPI,
   chat: chatAPI,
   health: healthAPI

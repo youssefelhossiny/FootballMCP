@@ -1269,6 +1269,98 @@ async def get_bot_team():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _fetch_entry_history(session, team_id):
+    """Return the FPL entry/{id}/history 'current' array (per-GW), or [] on failure."""
+    url = f"https://fantasy.premierleague.com/api/entry/{team_id}/history/"
+    async with session.get(url) as resp:
+        if resp.status != 200:
+            return []
+        data = await resp.json()
+        return data.get("current", [])
+
+
+@app.get("/api/history")
+@app.get("/api/history/{team_id}")
+async def get_history(team_id: Optional[int] = None):
+    """
+    Per-gameweek season history for the Stats page.
+
+    Proxies FPL entry/{id}/history/ for both the user's team (if team_id given)
+    and the bot, and pulls the gameweek field average from bootstrap-static's
+    events[].average_entry_score. Returns series aligned by gameweek:
+
+        { gw, user, bot, avg, rankUser, rankBot, bench }
+
+    When no team_id is supplied, `user` mirrors the field average so the Stats
+    page still renders a meaningful "you vs bot vs world" view.
+    """
+    try:
+        ssl_context = get_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Field average per finished gameweek
+            gw_url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+            async with session.get(gw_url) as resp:
+                bootstrap = await resp.json()
+            avg_by_gw = {
+                e["id"]: (e.get("average_entry_score") or 0)
+                for e in bootstrap["events"]
+                if e.get("finished")
+            }
+
+            bot_hist = await _fetch_entry_history(session, BOT_TEAM_ID)
+            user_hist = await _fetch_entry_history(session, team_id) if team_id else []
+
+            # Anchor the series on the gameweeks the bot has actually played,
+            # intersected with finished GWs that have a field average.
+            gws = sorted(
+                g["event"] for g in bot_hist if g["event"] in avg_by_gw
+            ) if bot_hist else sorted(avg_by_gw.keys())
+
+            if not gws:
+                raise HTTPException(status_code=503, detail="No gameweek history available yet")
+
+            bot_by_gw = {g["event"]: g for g in bot_hist}
+            user_by_gw = {g["event"]: g for g in user_hist}
+
+            def points(by_gw, gw):
+                return (by_gw.get(gw) or {}).get("points", 0)
+
+            def rank(by_gw, gw):
+                return (by_gw.get(gw) or {}).get("overall_rank") or 0
+
+            gw_list = list(gws)
+            avg = [avg_by_gw.get(gw, 0) for gw in gw_list]
+            bot = [points(bot_by_gw, gw) for gw in gw_list]
+            rank_bot = [rank(bot_by_gw, gw) for gw in gw_list]
+
+            if team_id and user_hist:
+                user = [points(user_by_gw, gw) for gw in gw_list]
+                rank_user = [rank(user_by_gw, gw) for gw in gw_list]
+                bench = [(user_by_gw.get(gw) or {}).get("points_on_bench", 0) for gw in gw_list]
+            else:
+                # No user team loaded — fall back to the field average line.
+                user = list(avg)
+                rank_user = list(rank_bot)
+                bench = [0 for _ in gw_list]
+
+            return {
+                "gw": gw_list,
+                "user": user,
+                "bot": bot,
+                "avg": avg,
+                "rankUser": rank_user,
+                "rankBot": rank_bot,
+                "bench": bench,
+                "has_user": bool(team_id and user_hist),
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/bot/decision")
 async def get_bot_decision(early: bool = False):
     """

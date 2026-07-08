@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import TeamFormation from '../components/TeamFormation'
 import ChatInterface from '../components/ChatInterface'
 import PlayerFinder from '../components/PlayerFinder'
+import PlayerProfile from '../components/PlayerProfile'
 import TopBar from '../components/TopBar'
 
 const POSITION_TO_NUMBER = { GKP: 1, GK: 1, DEF: 2, MID: 3, FWD: 4 }
@@ -32,6 +33,9 @@ function UserTeamPage() {
 
   // Chat visibility
   const [chatOpen, setChatOpen] = useState(true)
+
+  // Player profile slide-over (opened by name from the finder / pitch)
+  const [profilePlayerName, setProfilePlayerName] = useState(null)
 
   useEffect(() => {
     const saved = localStorage.getItem('fpl_team_id')
@@ -92,6 +96,58 @@ function UserTeamPage() {
     setSelectedOutPlayer(player)
   }
 
+  // Open the profile slide-over for any squad/bench player
+  const handlePlayerClick = (player) => {
+    setProfilePlayerName(player.web_name || player.name)
+  }
+
+  const posOf = (p) => p.element_type || POSITION_TO_NUMBER[p.position === 'GK' ? 'GKP' : p.position] || 0
+
+  // Whether a bench<->XI substitution keeps a legal formation (GK<->GK only;
+  // outfield must stay 3-5 DEF, 2-5 MID, 1-3 FWD).
+  const canSubstitute = (aId, bId) => {
+    if (!team || !aId || !bId || aId === bId) return false
+    const a = team.players.find(p => p.id === aId)
+    const b = team.players.find(p => p.id === bId)
+    if (!a || !b) return false
+    if (!!a.is_bench === !!b.is_bench) return false // one must be benched
+    const aGk = posOf(a) === 1, bGk = posOf(b) === 1
+    if (aGk !== bGk) return false
+    if (aGk) return true
+    const starter = a.is_bench ? b : a
+    const benched = a.is_bench ? a : b
+    const counts = { 2: 0, 3: 0, 4: 0 }
+    team.players.forEach(p => { if (!p.is_bench && posOf(p) > 1) counts[posOf(p)]++ })
+    counts[posOf(starter)]--
+    counts[posOf(benched)]++
+    return counts[2] >= 3 && counts[2] <= 5 && counts[3] >= 2 && counts[3] <= 5 && counts[4] >= 1 && counts[4] <= 3
+  }
+
+  // Swap a bench player with a starter (in place, preserving bench ordering)
+  const handleSubstitute = (aId, bId) => {
+    if (!canSubstitute(aId, bId)) {
+      if (aId && bId && aId !== bId) {
+        alert("That substitution isn't legal — keep 3–5 DEF, 2–5 MID, 1–3 FWD, and swap keepers only with keepers.")
+      }
+      return
+    }
+    setTeam(prev => {
+      const players = prev.players.map(p => {
+        if (p.id === aId) {
+          const other = prev.players.find(x => x.id === bId)
+          return { ...p, is_bench: other.is_bench, bench_order: other.bench_order }
+        }
+        if (p.id === bId) {
+          const other = prev.players.find(x => x.id === aId)
+          return { ...p, is_bench: other.is_bench, bench_order: other.bench_order }
+        }
+        return p
+      })
+      return { ...prev, players }
+    })
+    setProfilePlayerName(null)
+  }
+
   const handleAddFromFinder = (candidate) => {
     if (!team) return
     if (!selectedOutPlayer) {
@@ -122,6 +178,32 @@ function UserTeamPage() {
 
     const nextTransfers = [...suggestedTransfers, newTransfer]
     applyTransfersLocal(nextTransfers)
+    setSelectedOutPlayer(null)
+  }
+
+  // "+" picker path: user chose which squad player to replace with a market player.
+  const handleReplaceFromFinder = (squadPlayer, candidate) => {
+    if (!team) return
+    const outPosNum = squadPlayer.element_type || POSITION_TO_NUMBER[squadPlayer.position === 'GK' ? 'GKP' : squadPlayer.position]
+    const inPosStr = candidate.position === 'GK' ? 'GKP' : candidate.position
+    const inPosNum = POSITION_TO_NUMBER[inPosStr]
+    if (outPosNum !== inPosNum) {
+      alert(`Cannot swap ${NUMBER_TO_POSITION[outPosNum]} for ${inPosStr}. Same-position swap required.`)
+      return
+    }
+    const newTransfer = {
+      out: { name: squadPlayer.web_name || squadPlayer.name },
+      in: {
+        ...candidate,
+        name: candidate.web_name || candidate.name,
+        web_name: candidate.web_name,
+        now_cost: Math.round((candidate.price || 0) * 10),
+        element_type: inPosNum,
+        position: inPosNum,
+        is_transfer_in: true,
+      },
+    }
+    applyTransfersLocal([...suggestedTransfers, newTransfer])
     setSelectedOutPlayer(null)
   }
 
@@ -253,7 +335,10 @@ function UserTeamPage() {
             {/* Left: Player Finder */}
             <PlayerFinder
               squadPlayerIds={squadPlayerIds}
+              squadPlayers={team.players}
               onAdd={handleAddFromFinder}
+              onReplace={handleReplaceFromFinder}
+              onProfile={(p) => setProfilePlayerName(p.web_name || p.name)}
               selectedOutId={selectedOutPlayer?.id}
             />
 
@@ -263,7 +348,9 @@ function UserTeamPage() {
                 players={viewMode === 'current' ? team.players : (theoreticalTeam?.players || team.players)}
                 showTransferIndicators={viewMode === 'theoretical'}
                 selectedOutId={selectedOutPlayer?.id}
-                onSelectOut={handleSelectOut}
+                onPlayerClick={handlePlayerClick}
+                onSubstitute={viewMode === 'current' ? handleSubstitute : undefined}
+                canSubstitute={canSubstitute}
               />
 
               {selectedOutPlayer && (
@@ -329,6 +416,18 @@ function UserTeamPage() {
       {!team && !loading && !error && (
         <EmptyState />
       )}
+
+      <PlayerProfile
+        playerName={profilePlayerName}
+        squadPlayers={team?.players || []}
+        onClose={() => setProfilePlayerName(null)}
+        onTransferOut={(squadPlayer) => {
+          setProfilePlayerName(null)
+          handleSelectOut(squadPlayer)
+        }}
+        onSubstitute={viewMode === 'current' ? handleSubstitute : undefined}
+        canSubstitute={canSubstitute}
+      />
     </div>
   )
 }

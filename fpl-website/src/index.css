@@ -1,3 +1,7 @@
+/* Matchday display + tabular-numeral fonts (used by Stats page & player profile).
+   Archivo = sporty display/numerals, Hanken Grotesk = supporting UI.
+   Must precede all other rules per CSS @import ordering. */
+@import url('https://fonts.googleapis.com/css2?family=Archivo:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap');
 @import "tailwindcss";
 
 :root {
@@ -25,12 +29,94 @@
   --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.35);
   --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.45);
 
+  /* ============================================================
+     Matchday design tokens — additive, used by the Stats page and
+     player profile. Mapped onto the existing navy/emerald palette so
+     the new surfaces feel native to the current app. Existing tokens
+     above are untouched.
+     ============================================================ */
+  --font-display: 'Archivo', system-ui, sans-serif;
+  --font-num: 'Archivo', ui-monospace, 'JetBrains Mono', monospace;
+
+  /* Ink / surface scale (aligned to existing navy) */
+  --ink-900: #0a0f1a;
+  --ink-850: #0f1520;
+  --ink-800: #111827;
+  --ink-750: #151c2b;
+  --ink-700: #1a2333;
+  --ink-650: #2a3547;
+  --ink-500: #46525f;
+
+  --surface-1: var(--bg-surface);
+  --surface-2: var(--bg-card);
+  --surface-3: var(--bg-elevated);
+
+  /* Text neutrals (aliases onto existing scale + a brighter hi) */
+  --text-100: #f3f7fc;
+  --text-200: #c9d2de;
+  --text-300: var(--text-secondary);
+  --text-400: var(--text-muted);
+  --text-500: #4c5663;
+
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  /* Pitch green (primary) — matched to emerald accent */
+  --pitch-600: #059669;
+  --pitch-500: #10b981;
+  --pitch-400: #34d399;
+  --pitch-300: #6ee7b7;
+
+  /* Champion gold */
+  --gold-600: #d97706;
+  --gold-500: #f59e0b;
+  --gold-400: #fbbf24;
+
+  /* Flare (live / danger) */
+  --flare-600: #dc2626;
+  --flare-500: #ef4444;
+  --flare-400: #f87171;
+
+  /* Azure (info / bot / secondary) */
+  --azure-600: #2563eb;
+  --azure-500: #3b82f6;
+  --azure-400: #60a5fa;
+
+  --text-on-accent: #042316;
+
+  /* Semantic soft fills */
+  --accent-soft: rgba(16, 185, 129, 0.14);
+  --gold-soft: rgba(245, 158, 11, 0.14);
+  --danger-soft: rgba(239, 68, 68, 0.13);
+  --info-soft: rgba(59, 130, 246, 0.14);
+
+  /* Gradients / glows */
+  --grad-pitch: linear-gradient(135deg, var(--pitch-400) 0%, var(--pitch-600) 100%);
+  --grad-flare: linear-gradient(135deg, var(--flare-400) 0%, var(--flare-600) 100%);
+  --grad-card: linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0) 40%);
+  --glow-pitch: 0 0 0 1px rgba(16, 185, 129, 0.4), 0 0 24px rgba(16, 185, 129, 0.4);
+  --glow-gold: 0 0 0 1px rgba(245, 158, 11, 0.4), 0 0 24px rgba(245, 158, 11, 0.35);
+  --shadow-pop: 0 18px 50px -10px rgba(0, 0, 0, 0.75);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
   /* Typography */
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   line-height: 1.5;
   font-weight: 400;
   color-scheme: dark;
+}
+
+/* Tabular numerals for stat/number displays on the new surfaces */
+.tnum { font-variant-numeric: tabular-nums; font-family: var(--font-num); }
+
+/* Slide-over + fade motion for the player profile */
+@keyframes mdSlideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes mdFadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes mdPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* Stats page: collapse multi-column grids on narrow viewports */
+@media (max-width: 1080px) {
+  .md-h2h, .md-chart-grid, .md-intel-grid, .md-bench-grid { grid-template-columns: 1fr !important; }
 }
 
 body {

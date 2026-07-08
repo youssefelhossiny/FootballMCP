@@ -8,6 +8,15 @@ function PlayerCard({
   isSelectedForSwap = false,
   showPoints = false,
   onClick,
+  // Drag-and-drop substitution (optional)
+  draggable = false,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  isDropTarget = false,
+  isDragging = false,
 }) {
   const teamIds = {
     'ARS': 3, 'AVL': 7, 'BOU': 91, 'BRE': 94, 'BHA': 36, 'BUR': 90,
@@ -30,10 +39,24 @@ function PlayerCard({
   const rawPrice = player.now_cost || (player.price ? player.price * 10 : 0)
   const priceDisplay = (rawPrice / 10).toFixed(1)
 
-  const clickable = !!onClick && !isBench
+  const clickable = !!onClick
 
   return (
-    <div className={`flex flex-col items-center ${isBench ? 'w-[82px]' : 'w-[88px]'}`}>
+    <div
+      className={`flex flex-col items-center ${isBench ? 'w-[82px]' : 'w-[88px]'}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      style={{
+        borderRadius: '10px',
+        outline: isDropTarget ? '2px dashed var(--accent-primary)' : 'none',
+        outlineOffset: '2px',
+        opacity: isDragging ? 0.4 : 1,
+      }}
+    >
       {showBenchOrder && benchOrder !== null && (
         <div className="text-[9px] text-white/70 mb-0.5 px-1.5 py-0.5 rounded" style={{ background: 'rgba(0,0,0,0.35)' }}>
           {benchOrder}. {positionNames[player.position]}

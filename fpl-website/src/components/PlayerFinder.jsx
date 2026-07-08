@@ -11,11 +11,16 @@ const SORTS = [
   { key: 'ownership', label: 'Ownership' },
 ]
 
+const POS_NUM = { GK: 1, GKP: 1, DEF: 2, MID: 3, FWD: 4 }
+const posOf = (p) => p.element_type || POS_NUM[p.position === 'GK' ? 'GKP' : p.position] || 0
+
 /**
  * PlayerFinder — left column search / filter / sortable player list.
- * Clicking "+" fires onAdd(player) so parent can stage a transfer.
+ * Clicking "+" fires onAdd(player) so parent can stage a transfer. If no
+ * out-player is pre-selected, the row expands to let you pick which of your
+ * same-position squad players to replace.
  */
-function PlayerFinder({ squadPlayerIds = [], onAdd, selectedOutId = null }) {
+function PlayerFinder({ squadPlayerIds = [], squadPlayers = [], onAdd, onReplace, onProfile, selectedOutId = null }) {
   const [position, setPosition] = useState('ALL')
   const [team, setTeam] = useState('ALL')
   const [query, setQuery] = useState('')
@@ -200,8 +205,11 @@ function PlayerFinder({ squadPlayerIds = [], onAdd, selectedOutId = null }) {
                 player={p}
                 alreadyInSquad={squadPlayerIds.includes(p.id)}
                 onAdd={() => onAdd?.(p)}
+                onReplace={onReplace}
+                onProfile={() => onProfile?.(p)}
                 selectedOutId={selectedOutId}
                 sortKey={sort}
+                replaceOptions={squadPlayers.filter((sp) => posOf(sp) === posOf(p))}
               />
             ))}
           </div>
@@ -224,17 +232,32 @@ const POSITION_LABELS = {
   FWD: 'Forwards',
 }
 
-function PlayerRow({ player, alreadyInSquad, onAdd, selectedOutId, sortKey }) {
+function PlayerRow({ player, alreadyInSquad, onAdd, onReplace, onProfile, selectedOutId, sortKey, replaceOptions = [] }) {
   const primaryStat = formatStat(player[sortKey], sortKey)
+  const [pickerOpen, setPickerOpen] = useState(false)
+
+  const handlePlus = () => {
+    if (alreadyInSquad) return
+    // If an out-player is already selected on the pitch, complete that swap.
+    if (selectedOutId) { onAdd?.(); return }
+    // Otherwise let the user pick which same-position squad player to replace.
+    if (replaceOptions.length > 0) { setPickerOpen((v) => !v); return }
+    onAdd?.()
+  }
 
   return (
     <div
-      className="flex items-center gap-3 px-4 py-2 border-b transition-colors hover:bg-white/[0.03]"
+      className="border-b transition-colors hover:bg-white/[0.03]"
       style={{ borderColor: 'var(--border-subtle)' }}
     >
-      <div className="flex-1 min-w-0">
+    <div className="flex items-center gap-3 px-4 py-2">
+      <button
+        onClick={onProfile}
+        title="View player profile"
+        className="flex-1 min-w-0 text-left cursor-pointer bg-transparent border-0 p-0"
+      >
         <div className="flex items-center gap-1.5">
-          <span className="text-[13px] font-medium text-primary truncate">{player.web_name || player.name}</span>
+          <span className="text-[13px] font-medium text-primary truncate hover:underline">{player.web_name || player.name}</span>
           {player.status && player.status !== 'a' && (
             <StatusDot status={player.status} />
           )}
@@ -244,25 +267,47 @@ function PlayerRow({ player, alreadyInSquad, onAdd, selectedOutId, sortKey }) {
           <span>·</span>
           <span>{player.position}</span>
         </div>
-      </div>
+      </button>
       <div className="text-right shrink-0">
         <div className="num text-[12px] font-semibold text-primary">£{Number(player.price || 0).toFixed(1)}m</div>
         <div className="num text-[10px] text-muted">{primaryStat}</div>
       </div>
       <button
-        onClick={onAdd}
+        onClick={handlePlus}
         disabled={alreadyInSquad}
         className="w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
         style={alreadyInSquad
           ? { background: 'var(--bg-elevated)', color: 'var(--text-muted)' }
-          : selectedOutId
+          : (selectedOutId || pickerOpen)
             ? { background: 'var(--accent-primary)', color: 'white' }
             : { background: 'var(--bg-elevated)', color: 'var(--accent-primary)' }
         }
-        title={alreadyInSquad ? 'Already in squad' : selectedOutId ? 'Swap into squad' : 'Add to squad'}
+        title={alreadyInSquad ? 'Already in squad' : selectedOutId ? 'Swap into squad' : 'Choose who to replace'}
       >
-        {alreadyInSquad ? '✓' : '+'}
+        {alreadyInSquad ? '✓' : pickerOpen ? '×' : '+'}
       </button>
+    </div>
+
+    {/* Replace picker: choose which same-position squad player to swap out */}
+    {pickerOpen && !selectedOutId && (
+      <div className="px-4 pb-2.5" style={{ background: 'var(--accent-primary-soft)' }}>
+        <div className="text-[10px] uppercase tracking-wider text-muted font-semibold py-1.5">
+          Replace with {player.web_name || player.name} —
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {replaceOptions.map((sp) => (
+            <button
+              key={sp.id}
+              onClick={() => { onReplace?.(sp, player); setPickerOpen(false) }}
+              className="px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors"
+              style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)' }}
+            >
+              {sp.web_name || sp.name}{sp.is_bench ? ' (B)' : ''}
+            </button>
+          ))}
+        </div>
+      </div>
+    )}
     </div>
   )
 }

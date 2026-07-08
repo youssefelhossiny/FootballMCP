@@ -11,8 +11,12 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 ENV/
 *.egg-info/
+
+# Scraper runtime artifacts
+downloaded_files/
 .pytest_cache/
 
 # Training data (large files)

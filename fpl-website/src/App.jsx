@@ -1,6 +1,8 @@
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
 import BotTeamPage from './pages/BotTeamPage'
 import UserTeamPage from './pages/UserTeamPage'
+// StatsPage is built but not yet wired into the nav/routes — enable when ready.
+// import StatsPage from './pages/StatsPage'
 
 function App() {
   return (
@@ -29,6 +31,7 @@ function App() {
           <Routes>
             <Route path="/" element={<BotTeamPage />} />
             <Route path="/my-team" element={<UserTeamPage />} />
+            {/* <Route path="/stats" element={<StatsPage />} /> */}
           </Routes>
         </main>
       </div>
