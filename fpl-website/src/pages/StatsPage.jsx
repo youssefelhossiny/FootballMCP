@@ -126,7 +126,7 @@ function StatsPage() {
       <header style={{ display: 'flex', alignItems: 'flex-end', gap: '16px', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '260px' }}>
           <div style={{ fontSize: '11px', letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-400)', marginBottom: '5px' }}>
-            Season 2025/26 · after GW{n}
+            Season 2026/27 · after GW{n}
           </div>
           <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontWeight: 900, fontSize: '38px', letterSpacing: '-0.02em', textTransform: 'uppercase', color: 'var(--text-100)', lineHeight: 1 }}>
             You vs the bot vs the world

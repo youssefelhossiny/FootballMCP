@@ -12,6 +12,7 @@ from data_sources.understat_scraper import UnderstatScraper
 from data_sources.fbref_scraper import FBRefScraper
 from data_sources.data_cache import DataCache
 from player_mapping.name_matcher import PlayerNameMatcher
+from season_config import CURRENT_SEASON, PRIOR_SEASON, to_fbref, resolve_stats_season, display_label
 import asyncio
 from pathlib import Path
 
@@ -36,7 +37,7 @@ class EnhancedDataCollector:
             manual_mappings_path=str(base_dir / "player_mapping" / "manual_mappings.json")
         )
 
-    def fetch_understat_data(self, season: str = "2025", use_cache: bool = True) -> List[Dict]:
+    def fetch_understat_data(self, season: str = CURRENT_SEASON, use_cache: bool = True) -> List[Dict]:
         """
         Fetch Understat data with caching
 
@@ -73,7 +74,7 @@ class EnhancedDataCollector:
 
         return []
 
-    def fetch_fbref_data(self, season: str = "2025-2026", use_cache: bool = True) -> List[Dict]:
+    def fetch_fbref_data(self, season: str = None, use_cache: bool = True) -> List[Dict]:
         """
         Fetch FBRef defensive/progressive data with caching
 
@@ -84,6 +85,8 @@ class EnhancedDataCollector:
         Returns:
             List of FBRef player dicts with defensive/progressive stats
         """
+        if season is None:
+            season = to_fbref(CURRENT_SEASON)
         print("📥 Fetching FBRef data...")
         players = self.fbref_scraper.fetch_player_stats(season=season, use_cache=use_cache)
         return players
@@ -365,7 +368,7 @@ class EnhancedDataCollector:
     def collect_enhanced_data(
         self,
         fpl_players: List[Dict],
-        season: str = "2025",
+        season: str = None,
         use_cache: bool = True,
         match_threshold: int = 75
     ) -> Tuple[List[Dict], Dict]:
@@ -374,7 +377,9 @@ class EnhancedDataCollector:
 
         Args:
             fpl_players: List of FPL player dicts
-            season: Understat season (2025 = 2025/26 season)
+            season: Understat season year (e.g. "2026" = 2026/27). If None,
+                auto-detects: uses the current season when advanced-stat data
+                exists, otherwise falls back to the prior season as a baseline.
             use_cache: Whether to use cached data
             match_threshold: Name matching threshold (0-100)
 
@@ -383,11 +388,17 @@ class EnhancedDataCollector:
         """
         print("🚀 Starting enhanced data collection (Phase 4)...")
 
-        # Convert Understat season format to FBRef format
-        fbref_season = f"{season}-{int(season)+1}" if len(season) == 4 else season
+        # Resolve which season's advanced stats to use (auto-detect w/ fallback)
+        if season is None:
+            season, understat_players = resolve_stats_season(
+                self.fetch_understat_data, use_cache=use_cache
+            )
+        else:
+            understat_players = self.fetch_understat_data(season=season, use_cache=use_cache)
 
-        # Fetch Understat data
-        understat_players = self.fetch_understat_data(season=season, use_cache=use_cache)
+        # Keep FBRef on the same season Understat resolved to
+        fbref_season = to_fbref(season) if len(season) == 4 else season
+        print(f"📊 Advanced stats season: {display_label(season)}")
 
         # Fetch FBRef data
         fbref_players = self.fetch_fbref_data(season=fbref_season, use_cache=use_cache)
@@ -466,7 +477,7 @@ class EnhancedDataCollector:
         self,
         player_id: int,
         fpl_players: List[Dict],
-        season: str = "2025"
+        season: str = None
     ) -> Optional[Dict]:
         """
         Get a single enhanced player by FPL ID
@@ -474,7 +485,8 @@ class EnhancedDataCollector:
         Args:
             player_id: FPL player ID
             fpl_players: List of all FPL players
-            season: Understat season (2025 = 2025/26 season)
+            season: Understat season year (e.g. "2026"). If None, auto-detects
+                current season with prior-season fallback.
 
         Returns:
             Enhanced player dict or None
@@ -484,11 +496,14 @@ class EnhancedDataCollector:
         if not fpl_player:
             return None
 
-        # Convert season format for FBRef
-        fbref_season = f"{season}-{int(season)+1}" if len(season) == 4 else season
+        # Resolve season (auto-detect w/ fallback) and get Understat data
+        if season is None:
+            season, understat_players = resolve_stats_season(self.fetch_understat_data)
+        else:
+            understat_players = self.fetch_understat_data(season=season)
 
-        # Get Understat data
-        understat_players = self.fetch_understat_data(season=season)
+        # Convert season format for FBRef
+        fbref_season = to_fbref(season) if len(season) == 4 else season
 
         # Get FBRef data
         fbref_players = self.fetch_fbref_data(season=fbref_season)

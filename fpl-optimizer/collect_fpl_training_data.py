@@ -35,7 +35,6 @@ async def collect_fpl_training_data():
     collector = EnhancedDataCollector(cache_ttl_hours=6)
     enhanced_players, match_stats = collector.collect_enhanced_data(
         players,
-        season="2025",
         use_cache=True
     )
     print(f"✅ Enhanced {len(enhanced_players)} players with external data")

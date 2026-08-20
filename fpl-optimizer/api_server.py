@@ -471,7 +471,6 @@ def enhance_players_with_understat(players: list) -> tuple:
     try:
         enhanced_players, match_stats = enhanced_collector.collect_enhanced_data(
             players,
-            season="2025",
             use_cache=True
         )
         return enhanced_players, match_stats

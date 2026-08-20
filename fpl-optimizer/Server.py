@@ -163,7 +163,6 @@ def enhance_players_with_understat(players: list[dict]) -> tuple[list[dict], dic
     try:
         enhanced_players, match_stats = enhanced_collector.collect_enhanced_data(
             players,
-            season="2025",
             use_cache=True
         )
         logger.info(f"✅ Enhanced {len(enhanced_players)} players with Understat data ({match_stats['match_rate']:.1f}% matched)")

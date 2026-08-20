@@ -50,13 +50,13 @@ class FBRefScraper:
 
         self.last_request_time = time.time()
 
-    def _get_fbref_client(self, season: str = "2025-2026"):
+    def _get_fbref_client(self, season: str = "2026-2027"):
         """Get or create FBRef client"""
         if self.fbref is None:
             self.fbref = sd.FBref(leagues="ENG-Premier League", seasons=season)
         return self.fbref
 
-    def fetch_player_stats(self, season: str = "2025-2026", use_cache: bool = True) -> List[Dict]:
+    def fetch_player_stats(self, season: str = "2026-2027", use_cache: bool = True) -> List[Dict]:
         """
         Fetch all player stats from FBRef (defensive, passing, possession)
 
@@ -120,6 +120,15 @@ class FBRefScraper:
             print(f"Error fetching FBRef data: {e}")
             import traceback
             traceback.print_exc()
+
+            # FALLBACK: if the live scrape fails (e.g. upstream stat_type
+            # changes, or early-season data not yet published), use the last
+            # good cache even if expired, rather than returning nothing.
+            stale_data = self.cache.get(cache_key, format="json", ignore_expiry=True)
+            if stale_data:
+                print(f"✅ Using stale FBRef cache ({len(stale_data)} players)")
+                return stale_data
+
             return []
 
     def _process_stats(
