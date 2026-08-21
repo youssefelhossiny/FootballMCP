@@ -258,6 +258,10 @@ class FBRefScraper:
         if cache_dir is None:
             cache_dir = str(Path(__file__).parent.parent / "cache")
         self.cache = DataCache(cache_dir=cache_dir, ttl_hours=6)
+        # Separate, much shorter TTL for "this season isn't available" markers.
+        # Long enough to keep interactive tool calls fast, short enough that a
+        # season going live is picked up within the hour rather than after 6.
+        self.failure_cache = DataCache(cache_dir=cache_dir, ttl_hours=1)
 
     def _rate_limit(self):
         """Implement rate limiting (6 seconds for FBRef)"""
@@ -299,12 +303,27 @@ class FBRefScraper:
         """
         league_slug = league.replace(" ", "_").replace("-", "_").lower()
         cache_key = f"fbref_{league_slug}_{season.replace('-', '_')}"
+        failure_key = f"{cache_key}_unavailable"
 
         # Check cache first
         if use_cache:
             cached_data = self.cache.get(cache_key, format="json")
             if cached_data:
                 return cached_data
+
+            # Negative cache. A season FBRef hasn't published yet (or that its
+            # anti-bot layer refuses) costs minutes to fail: Selenium starts,
+            # every stat type retries, then we return []. `resolve_stats_season`
+            # probes the current season on EVERY call, so without this each of
+            # the ~7 tools that enhance player data paid that cost every time,
+            # making them unusable interactively. Remember the failure briefly
+            # and skip straight to the caller's fallback.
+            if self.failure_cache.get(failure_key, format="json") is not None:
+                print(
+                    f"⏭️  Skipping FBRef {league} {season} — a recent fetch found "
+                    f"no data (negative-cached; clear cache/{failure_key}.json to retry)"
+                )
+                return []
 
         try:
             print(f"Fetching FBRef data for {league} {season}...")
@@ -389,6 +408,10 @@ class FBRefScraper:
             # Cache the results
             if processed:
                 self.cache.set(cache_key, processed, format="json")
+            else:
+                # Empty but no exception — the season parsed to nothing (not
+                # yet published). Negative-cache so the next call is instant.
+                self.failure_cache.set(failure_key, {"reason": "no rows returned"}, format="json")
 
             print(f"Fetched {len(processed)} players from FBRef")
             return processed
@@ -406,6 +429,7 @@ class FBRefScraper:
                 print(f"✅ Using stale FBRef cache ({len(stale_data)} players)")
                 return stale_data
 
+            self.failure_cache.set(failure_key, {"reason": str(e)[:200]}, format="json")
             return []
 
     def fetch_championship_stats(self, season: str = "2025-2026", use_cache: bool = True) -> List[Dict]:

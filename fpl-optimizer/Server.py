@@ -387,18 +387,21 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="evaluate_transfer",
             description=(
-                "Evaluate a specific transfer you're considering. "
-                "Shows: points difference, cost analysis, alternatives. "
-                "Recommendation: DO IT / WAIT / RECONSIDER"
+                "Evaluate a specific transfer you're considering. Compares predicted points, "
+                "xG/xA, defensive stats and cost, then gives a recommendation: DO IT / WAIT / "
+                "RECONSIDER. Pass player NAMES (player_out/player_in) — ids are accepted too but "
+                "names are usually what you have. "
+                "Use for: 'Should I swap Saka for Palmer?', 'Is X worth a -4 hit?'"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "player_out_id": {"type": "number", "description": "Player to transfer OUT"},
-                    "player_in_id": {"type": "number", "description": "Player to transfer IN"},
+                    "player_out": {"type": "string", "description": "Name of player to transfer OUT, e.g. 'Saka'"},
+                    "player_in": {"type": "string", "description": "Name of player to transfer IN, e.g. 'Palmer'"},
+                    "player_out_id": {"type": "number", "description": "FPL id of player OUT (alternative to player_out)"},
+                    "player_in_id": {"type": "number", "description": "FPL id of player IN (alternative to player_in)"},
                     "free_transfers": {"type": "number", "default": 1}
-                },
-                "required": ["player_out_id", "player_in_id"]
+                }
             }
         ),
         types.Tool(
@@ -1368,19 +1371,58 @@ async def handle_call_tool(
             enhanced_players, _ = enhance_players_with_understat(players_list)
             players_data = {p['id']: p for p in enhanced_players}
 
-            player_out_id = arguments.get('player_out_id')
-            player_in_id = arguments.get('player_in_id')
+            # Accept names as well as ids. The tool previously required numeric
+            # FPL ids, which nobody knows offhand — so in practice it could only
+            # be called after a separate lookup, and a natural "swap Saka for
+            # Palmer" request failed outright.
+            def _resolve(name_arg: str, id_arg) -> tuple:
+                if id_arg:
+                    found = players_data.get(int(id_arg))
+                    return found, (None if found else f"No player with id {id_arg}")
+                if not name_arg:
+                    return None, None
+                needle = str(name_arg).strip().lower()
+                matches = [
+                    p for p in enhanced_players
+                    if needle == p.get('web_name', '').lower()
+                ] or [
+                    p for p in enhanced_players
+                    if needle in p.get('web_name', '').lower()
+                    or needle in f"{p.get('first_name','')} {p.get('second_name','')}".strip().lower()
+                ]
+                # Same surname, different players: if only one has played, that's
+                # the one meant (e.g. "Palmer" -> Cole, 1954 mins, not Alex, 0).
+                if len(matches) > 1:
+                    played = [p for p in matches if int(p.get('minutes', 0) or 0) > 0]
+                    if len(played) == 1:
+                        matches = played
+                if not matches:
+                    return None, f"Could not find a player matching '{name_arg}'"
+                if len(matches) > 1:
+                    # Distinct players genuinely share a web_name (e.g. Cole
+                    # Palmer / Alex Palmer), so identify them by full name,
+                    # club and id — otherwise the disambiguation prompt just
+                    # repeats the same word back.
+                    options = '; '.join(
+                        f"{m.get('first_name','')} {m.get('second_name','')}".strip()
+                        + f" ({teams_data.get(m.get('team'), {}).get('short_name','?')}, id={m.get('id')})"
+                        for m in matches[:8]
+                    )
+                    return None, f"'{name_arg}' is ambiguous — did you mean: {options}?"
+                return matches[0], None
 
-            if not player_out_id or not player_in_id:
-                return [types.TextContent(type="text", text="❌ Missing required parameters: player_out_id and player_in_id")]
+            player_out, out_err = _resolve(arguments.get('player_out'), arguments.get('player_out_id'))
+            player_in, in_err = _resolve(arguments.get('player_in'), arguments.get('player_in_id'))
+
+            if out_err or in_err:
+                return [types.TextContent(type="text", text="❌ " + "; ".join(filter(None, [out_err, in_err])))]
+            if not player_out or not player_in:
+                return [types.TextContent(type="text", text=(
+                    "❌ Need both players. Pass player_out and player_in as names "
+                    "(e.g. player_out='Saka', player_in='Palmer')."
+                ))]
 
             free_transfers = arguments.get('free_transfers', 1)
-
-            player_out = players_data.get(player_out_id)
-            player_in = players_data.get(player_in_id)
-
-            if not player_out or not player_in:
-                return [types.TextContent(type="text", text="❌ Player not found")]
 
             # Predict points
             out_pred = predictor.predict_player_points(player_out, {}, {})
