@@ -13,6 +13,10 @@ try:
 except ImportError:
     Anthropic = None
 
+# Model used for the chat tool-loop. Overridable via env so it can be changed
+# without a code deploy when a model is retired.
+CHAT_MODEL = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-opus-5")
+
 # Allowed topics for the chatbot - must be FPL related
 ALLOWED_TOPICS = [
     # FPL specific
@@ -110,12 +114,29 @@ RESPONSE STYLE:
 
 COMPREHENSIVE ANALYSIS - call these tools IN PARALLEL:
 When a user asks about their team (transfers, captain, analysis), always call MULTIPLE tools simultaneously:
-- "suggest transfers" → Call suggest_transfers + get_fixtures + suggest_captain at once
-- "who should I captain" → Call suggest_captain + get_fixtures at once
-- "analyze my team" → Call suggest_transfers + suggest_captain + get_fixtures at once
-- Player questions → Call get_player_details + get_fixtures for their team at once
+- "suggest transfers" → Call suggest_transfers + get_fixtures + get_ml_prediction + get_team_news at once
+- "who should I captain" → Call suggest_captain + get_fixtures + get_ml_prediction + get_team_news at once
+- "analyze my team" → Call suggest_transfers + suggest_captain + get_fixtures + get_team_news at once
+- "is X injured / will X play / any team news" → Call get_team_news + get_injury_report at once
+- Player questions → Call get_player_details + get_fixtures + get_ml_prediction at once
 
 After getting results, use evaluate_transfer if the user wants to compare specific players.
+
+ALWAYS CHECK AVAILABILITY BEFORE RECOMMENDING ANYONE:
+Never recommend a captain, transfer-in or starter without checking they're actually available.
+- get_team_news → predicted starting XI, rotation risk, out/doubtful (third-party, updates fastest)
+- get_injury_report → FPL's own injury flags and chance-of-playing %
+A player with great stats who is injured, suspended or benched is a bad pick — say so explicitly.
+
+USING get_ml_prediction:
+Predicted points for the next gameweek, plus how likely each player is to start.
+- Treat it as ONE signal among several, never the sole reason for a recommendation.
+- It ranks who's likely to do well but under-predicts big hauls, so don't quote its
+  number as a precise forecast ("expect exactly 5.1 points"). Say "the model rates him
+  highly" or "the model prefers X over Y".
+- If it reports low confidence (pre-season, no gameweek history yet), say so rather than
+  presenting the numbers as reliable.
+- Always sanity-check its picks against fixtures and team news before recommending them.
 
 USING make_transfer:
 When the user asks to replace/swap/transfer a player (e.g., "replace Salah with Son", "swap out Haaland for Isak"):
@@ -278,9 +299,13 @@ async def query_anthropic(
             iteration += 1
             print(f"[Anthropic] Request iteration {iteration} (max_tokens={current_max_tokens})")
 
-            # Make API call - Claude Sonnet 4 is best at parallel tool use
+            # Model is overridable via env so it can be changed without a deploy.
+            # The previous hardcoded "claude-sonnet-4-20250514" was retired and
+            # returned 404 not_found_error on every request — the chat endpoint
+            # was returning generic advice with zero tool calls because every
+            # API call failed and the error was swallowed by the except below.
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CHAT_MODEL,
                 max_tokens=current_max_tokens,
                 system=SYSTEM_PROMPT,
                 tools=anthropic_tools,

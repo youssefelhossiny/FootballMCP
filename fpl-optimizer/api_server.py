@@ -36,7 +36,7 @@ from auth import (
 )
 
 # Anthropic chat integration (replaces Ollama)
-from anthropic_chat import query_anthropic
+from anthropic_chat import query_anthropic, CHAT_MODEL
 
 # Import existing modules - FULL MCP INTEGRATION
 from enhanced_features import EnhancedDataCollector
@@ -2015,7 +2015,7 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
             response=response,
             tools_used=tools_used,
             transfers=transfers,
-            model="anthropic/claude-3.5-haiku"
+            model=CHAT_MODEL
         )
 
     except HTTPException:
