@@ -73,6 +73,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import httpx
+import aiohttp
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
@@ -82,6 +83,9 @@ from predict_points import FPLPointsPredictor
 from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
 from chips_strategy import ChipsStrategyAnalyzer
 from enhanced_features import EnhancedDataCollector
+from data_sources.availability_filter import AvailabilityFilter
+from data_sources.team_news_scraper import fetch_knocks_and_bans, fetch_ffscout_team_news
+import ml_predict_v2
 from pathlib import Path
 
 # Get our logger (already configured above)
@@ -118,16 +122,61 @@ optimizer = FPLOptimizer()
 enhanced_optimizer = EnhancedOptimizer()
 fixture_analyzer = FixtureAnalyzer()
 chips_analyzer = ChipsStrategyAnalyzer()
-predictor = FPLPointsPredictor()
+availability_filter = AvailabilityFilter()
 enhanced_collector = EnhancedDataCollector(cache_ttl_hours=6)
-try:
-    predictor.load_model()
-    logger.info("✅ Predictor model loaded successfully")
-except FileNotFoundError as e:
-    logger.warning(f"⚠️ Predictor model not found: {e}")
-    logger.warning("Run: python fpl-optimizer/predict_points.py")
-except Exception as e:
-    logger.error(f"❌ Error loading predictor: {e}")
+
+
+class _PointsPredictorV2:
+    """
+    Adapter exposing v1's `predict_player_points(player, fixtures, teams)` while
+    serving predictions from the v2 model.
+
+    Several tools here (optimize_squad_lp, evaluate_transfer, suggest_captain,
+    suggest_transfers) called that method on the v1 model, which was trained on
+    a synthetic target derived from its own features and measured to barely beat
+    guessing. Rather than change five call sites, this keeps the interface and
+    swaps the model underneath. Falls back to v1 only if v2 is unavailable.
+    """
+
+    def __init__(self):
+        self._v2_available = ml_predict_v2.model_info().get("available", False)
+        # These call sites predict one player at a time inside loops over a
+        # squad or the whole player pool, so cache per player id — otherwise
+        # each call rebuilds a DataFrame and re-runs both models.
+        self._cache: dict = {}
+        self._v1 = None
+        if not self._v2_available:
+            self._v1 = FPLPointsPredictor()
+            try:
+                self._v1.load_model()
+                logger.warning("⚠️ v2 model unavailable — falling back to the v1 model")
+            except Exception as e:
+                logger.error(f"❌ No usable points model (v2 missing, v1 failed): {e}")
+                self._v1 = None
+
+    def predict_player_points(self, player: dict, fixtures: dict = None, teams: dict = None) -> float:
+        if self._v2_available:
+            player_id = player.get("id")
+            if player_id in self._cache:
+                return self._cache[player_id]
+            # No per-GW history threaded through these call sites, so this uses
+            # v2's season-total fallback path. Still a real model prediction.
+            result = ml_predict_v2.predict_points([player])
+            value = float(result.get(player_id, {}).get("predicted_points", 0.0))
+            self._cache[player_id] = value
+            return value
+        if self._v1 is not None:
+            try:
+                return float(self._v1.predict_player_points(player, fixtures or {}, teams or {}))
+            except Exception:
+                return 0.0
+        return 0.0
+
+
+predictor = _PointsPredictorV2()
+if predictor._v2_available:
+    _info = ml_predict_v2.model_info()
+    logger.info(f"✅ Points model {_info['version']} loaded ({_info['n_features']} features)")
 
 
 async def make_fpl_request(endpoint: str, params: dict = None) -> dict:
@@ -512,6 +561,86 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["team_id", "free_transfers"]
+            }
+        ),
+        types.Tool(
+            name="get_ml_prediction",
+            description=(
+                "Get machine-learning predicted points for the NEXT gameweek, plus the probability "
+                "each player actually starts (60+ minutes). Trained on real historical per-gameweek "
+                "outcomes across three seasons. Use as ONE signal among several: its top picks "
+                "historically averaged ~1.5 more points per pick than a recent-form heuristic, but it "
+                "deliberately under-predicts big hauls, so treat it as 'who is likely to do well', not "
+                "'exactly how many points'. Always weigh against injury/team news and fixtures. "
+                "Use for: 'Who should I captain?', 'Is X a good pick?', 'Best midfielders this week'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "player_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Specific players to predict, e.g. ['Haaland','Saka']. More accurate than "
+                            "the ranked list, as it uses each player's real per-gameweek history."
+                        ),
+                        "default": []
+                    },
+                    "position": {
+                        "type": "string",
+                        "enum": ["all", "GK", "DEF", "MID", "FWD"],
+                        "description": "Restrict the ranked list to one position (ignored if player_names given)",
+                        "default": "all"
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "How many players in the ranked list (default 10, max 30)",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 30
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="get_injury_report",
+            description=(
+                "Get injured, suspended and doubtful players from FPL's own official status data "
+                "(status flags, chance-of-playing %, and news text). Check this before recommending "
+                "transfers, captains or lineups — a doubtful player shouldn't be captained even if "
+                "their underlying stats look strong. Can filter to one team. "
+                "Use for: 'Who's injured?', 'Any Arsenal injury news?', 'Is my captain fit?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "description": "Filter to one team, e.g. 'Arsenal' (optional)",
+                        "default": None
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="get_team_news",
+            description=(
+                "Get fast, near-real-time team news from third-party sources (Knocks and Bans + "
+                "Fantasy Football Scout) — these update faster than FPL's own injury data, which can "
+                "lag real announcements by a day or more. Returns PREDICTED STARTING LINEUPS plus "
+                "out/doubtful/banned players per team — including rotation risk for players who are "
+                "fully fit but might be benched, which FPL's own data does not cover at all. "
+                "Use for: 'Who's likely to start?', 'Latest team news', 'Will X play this week?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "description": "Filter to one team, e.g. 'Arsenal' (optional)",
+                        "default": None
+                    }
+                }
             }
         )
     ]
@@ -1761,6 +1890,180 @@ async def handle_call_tool(
 
             if 'triple_captain' in available_chips:
                 results.append("💡 Use TRIPLE CAPTAIN on premium players in double gameweeks")
+
+        return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "get_ml_prediction":
+        player_names = arguments.get('player_names') or []
+        position = arguments.get('position', 'all')
+        limit = min(int(arguments.get('limit', 10) or 10), 30)
+
+        info = ml_predict_v2.model_info()
+        if not info.get('available'):
+            return [types.TextContent(type="text", text=(
+                "The ML prediction model isn't available on this deployment, so I can't give "
+                "model-based projections. Form, fixtures and team news still work."
+            ))]
+
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            return [types.TextContent(type="text", text=f"Error fetching FPL data: {data['error']}")]
+        all_players = data.get('elements', [])
+        teams = {t['id']: t for t in data.get('teams', [])}
+
+        if player_names:
+            selected = []
+            for wanted in player_names[:10]:
+                needle = wanted.lower()
+                for p in all_players:
+                    web_name = p.get('web_name', '').lower()
+                    if needle in web_name or web_name in needle:
+                        selected.append(p)
+                        break
+            if not selected:
+                return [types.TextContent(type="text", text=(
+                    f"Could not find any of those players: {', '.join(player_names)}"
+                ))]
+            # Named players get the accurate path: real per-GW history.
+            histories = {}
+            for p in selected:
+                detail = await make_fpl_request(f"element-summary/{p['id']}/")
+                if isinstance(detail, dict) and "error" not in detail:
+                    history = detail.get('history') or []
+                    if history:
+                        histories[p['id']] = history
+            preds = ml_predict_v2.predict_points(selected, histories)
+            header = "**Predicted points (next gameweek)**"
+        else:
+            pool = all_players
+            if position and position != 'all':
+                wanted_type = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}.get(position.upper())
+                if wanted_type:
+                    pool = [p for p in pool if p.get('element_type') == wanted_type]
+            preds = ml_predict_v2.predict_points(pool)
+            selected = sorted(
+                pool, key=lambda p: preds.get(p['id'], {}).get('predicted_points', 0), reverse=True
+            )[:limit]
+            header = f"**Top {len(selected)} by predicted points (next gameweek)**"
+            if position and position != 'all':
+                header += f" — {position.upper()}"
+
+        results = [header, ""]
+        for p in selected:
+            r = preds.get(p['id'])
+            if not r:
+                continue
+            team_short = teams.get(p.get('team', 0), {}).get('short_name', '?')
+            results.append(
+                f"  {p.get('web_name')} ({team_short}, {format_price(p.get('now_cost', 0))}): "
+                f"{r['predicted_points']} pts | {int(r['play_probability'] * 100)}% likely to start | "
+                f"{r['points_if_plays']} pts if they do (confidence: {r['confidence']})"
+            )
+
+        if any(preds.get(p['id'], {}).get('basis') == 'season_totals' for p in selected):
+            results.append("")
+            results.append(
+                "Note: no gameweek history exists yet this season, so these are estimated from "
+                "last season's per-game rates and cannot reflect current form — treat as rough."
+            )
+        results.append("")
+        results.append(
+            "This model ranks who's likely to do well; it deliberately under-predicts big hauls, "
+            "so use it alongside fixtures and team news rather than on its own."
+        )
+        return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "get_injury_report":
+        team_filter = arguments.get('team')
+
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            return [types.TextContent(type="text", text=f"Error fetching FPL data: {data['error']}")]
+        players_list = data.get('elements', [])
+        teams = {t['id']: t for t in data.get('teams', [])}
+
+        if team_filter:
+            needle = team_filter.lower()
+            team_ids = [
+                t['id'] for t in teams.values()
+                if needle in t.get('name', '').lower() or needle in t.get('short_name', '').lower()
+            ]
+            players_list = [p for p in players_list if p.get('team') in team_ids]
+
+        report = availability_filter.get_injury_report(players_list)
+        results = ["**Injury Report**" + (f" — {team_filter}" if team_filter else ""), ""]
+
+        any_concerns = False
+        for key, label in (("injured", "Injured"), ("suspended", "Suspended"), ("doubtful", "Doubtful")):
+            entries = report.get(key, [])
+            if not entries:
+                continue
+            any_concerns = True
+            results.append(f"**{label}** ({len(entries)}):")
+            for p in entries[:20]:
+                team_short = teams.get(p.get('team', 0), {}).get('short_name', '?')
+                chance = p.get('chance')
+                chance_text = f"{chance}% chance" if chance is not None else "no % given"
+                results.append(f"  {p.get('web_name')} ({team_short}) - {chance_text} - {p.get('news') or 'no details'}")
+            if len(entries) > 20:
+                results.append(f"  ... and {len(entries) - 20} more")
+            results.append("")
+
+        if not any_concerns:
+            results.append("No injury, suspension or doubt concerns found.")
+
+        return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "get_team_news":
+        team_filter = arguments.get('team')
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                knocks_and_bans, ffscout = await asyncio.gather(
+                    fetch_knocks_and_bans(session),
+                    fetch_ffscout_team_news(session),
+                )
+        except Exception as e:
+            logger.warning(f"Team news fetch failed: {e}")
+            knocks_and_bans, ffscout = [], []
+
+        if not knocks_and_bans and not ffscout:
+            return [types.TextContent(type="text", text=(
+                "Team news sources are temporarily unavailable — use get_injury_report for FPL's "
+                "own injury data instead."
+            ))]
+
+        results = ["**Team News (third-party, faster-updating than FPL's own data)**"]
+
+        teams_to_show = ffscout
+        if team_filter:
+            needle = team_filter.lower()
+            teams_to_show = [t for t in ffscout if needle in t['team'].lower()]
+
+        for t in teams_to_show:
+            results.append("")
+            suffix = f" (updated: {t['last_updated']})" if t.get('last_updated') else ""
+            results.append(f"**{t['team']}**{suffix}:")
+            if t.get('predicted_lineup'):
+                results.append(f"  Predicted XI: {', '.join(t['predicted_lineup'])}")
+            if t.get('out'):
+                results.append(f"  Out: {', '.join(t['out'])}")
+            if t.get('doubts'):
+                results.append(f"  Doubts: {', '.join(t['doubts'])}")
+            if t.get('banned'):
+                results.append(f"  Banned: {', '.join(t['banned'])}")
+
+        # Knocks and Bans entries carry no team tag, so they're only useful
+        # unfiltered; FFScout above already covers the per-team breakdown.
+        if knocks_and_bans and not team_filter:
+            results.append("")
+            results.append(f"**Injury/Suspension Status (all teams, {len(knocks_and_bans)} entries)**:")
+            for e in knocks_and_bans[:30]:
+                detail = e.get('injury_type') or "no details"
+                return_text = f", est. return {e['expected_return']}" if e.get('expected_return') else ""
+                results.append(f"  {e['name']} - {e['status']} - {detail}{return_text}")
+            if len(knocks_and_bans) > 30:
+                results.append(f"  ... and {len(knocks_and_bans) - 30} more")
 
         return [types.TextContent(type="text", text="\n".join(results))]
 
