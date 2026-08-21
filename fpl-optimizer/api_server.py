@@ -80,6 +80,16 @@ predictor = FPLPointsPredictor()
 availability_filter = AvailabilityFilter()
 fixture_analyzer = FixtureAnalyzer()
 enhanced_optimizer = EnhancedOptimizer()
+
+# Minimum FPL chance-of-playing to be SELECTED into a squad. Players FPL marks
+# injured / suspended / unavailable are already excluded regardless.
+#
+# Set to 50 deliberately: FPL auto-substitutes, so owning a strong player on a
+# temporary doubt costs nothing (start him — points if he plays, auto-sub if
+# not), while a sub-50% flag usually means a real absence not worth a squad slot.
+# The model's predicted_points already discounts by play probability, so a
+# doubtful player is naturally ranked lower without being banned outright.
+SQUAD_MIN_CHANCE = int(os.getenv("SQUAD_MIN_CHANCE", "50"))
 chips_analyzer = ChipsStrategyAnalyzer()
 # Short TTL: these sources claim near-real-time updates, so a stale multi-hour
 # cache (like the 6h default) would defeat the point of using them over FPL's
@@ -796,14 +806,19 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
     current_gw = next((e["id"] for e in data.get("events", []) if e.get("is_next")), None) \
         or next((e["id"] for e in data.get("events", []) if e.get("is_current")), 1)
 
-    # Never build a squad around players who can't play.
+    # Selection bar. `filter_available_players` already drops anyone FPL marks
+    # injured / suspended / unavailable / not-in-squad outright.
     #
-    # min_chance=100 rather than the 75 default: the default admits players FPL
-    # itself flags as doubtful (status 'd'). Doku sat at exactly 75% with a calf
-    # injury and passed `chance >= 75`, so he was picked AND made vice-captain.
-    # For a squad you're committing for a whole gameweek, "probably fit" isn't
-    # good enough — anything short of a clean bill of health is excluded.
-    available = availability_filter.filter_available_players(all_players, min_chance=100)
+    # The threshold here is a genuine trade-off. Too low and you spend money on
+    # players who may not feature; too high and you exclude an elite player on a
+    # temporary doubt — a 50%-chance Haaland is still worth owning, because FPL
+    # auto-subs mean starting him costs nothing if he sits out. SQUAD_MIN_CHANCE
+    # is the compromise: keep clear doubts out of an opening squad you're
+    # committing for the whole gameweek, while not demanding perfect health.
+    # Whether such a player then STARTS is a separate decision (see start_rank).
+    available = availability_filter.filter_available_players(
+        all_players, min_chance=SQUAD_MIN_CHANCE
+    )
 
     # Cross-check against third-party team news, which carries signal FPL's own
     # data does not: a fully fit player who simply isn't in his club's predicted
@@ -811,20 +826,44 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
     # bookmakers' own lineups had on the bench. Advisory only — if the scrape
     # fails the squad is still built, just without this filter.
     excluded_by_news: Dict[str, str] = {}
+    rotation_risk_ids: set = set()
     try:
         news = await fetch_team_news()
-        flagged = set()
+
+        # Two DISTINCT signals, deliberately not merged:
+        #   unavailable   -> out / banned / injured. Never select.
+        #   rotation_risk -> fit per FPL but not in his club's predicted XI.
+        #                    Selectable, but must never START or be captain.
+        # Collapsing these into one set would either bench genuinely-out
+        # players (pointless — they can't play at all) or start players the
+        # club's own lineup has on the bench.
+        unavailable = set()
+        rotation_flagged = set()
+
         for entry in news.get("knocks_and_bans", []):
             status = str(entry.get("status", "")).lower()
             if "out" in status or "doubt" in status:
-                flagged.add(entry["name"].strip().lower())
+                unavailable.add(entry["name"].strip().lower())
+
         for team_news in news.get("ffscout", []):
-            for group in ("out", "doubts", "banned"):
+            for group in ("out", "banned"):
                 for raw in team_news.get(group, []):
-                    # strip a trailing "(75%)" and any bracketed first name
                     name = raw.split("(")[0].strip().lower()
                     if name:
-                        flagged.add(name)
+                        unavailable.add(name)
+            # A doubt is not an "out" — keep them selectable but bench-only.
+            for raw in team_news.get("doubts", []):
+                name = raw.split("(")[0].strip().lower()
+                if name:
+                    rotation_flagged.add(name)
+            # Fully fit but missing from the predicted XI = rotation risk.
+            predicted = {
+                p.split("(")[0].strip().lower()
+                for p in team_news.get("predicted_lineup", [])
+            }
+            team_news["_predicted_names"] = predicted
+
+        flagged = unavailable
 
         def news_flagged(player: Dict) -> Optional[str]:
             """
@@ -847,13 +886,26 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
                     return candidate
             return None
 
+        def matches(player: Dict, names: set) -> Optional[str]:
+            """Exact-match only — see news_flagged for why substrings are unsafe."""
+            web = (player.get("web_name") or "").strip().lower()
+            second = (player.get("second_name") or "").strip().lower()
+            full = f"{player.get('first_name','')} {player.get('second_name','')}".strip().lower()
+            for candidate in (full, second, web):
+                if candidate and candidate in names:
+                    return candidate
+            return None
+
         kept = []
         for player in available:
             hit = news_flagged(player)
             if hit:
                 excluded_by_news[player.get("web_name", "?")] = hit
-            else:
-                kept.append(player)
+                continue
+            kept.append(player)
+            # Selectable but bench-only: an explicit doubt in the news.
+            if matches(player, rotation_flagged):
+                rotation_risk_ids.add(player["id"])
         if kept:
             available = kept
     except Exception as e:
@@ -867,6 +919,33 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
     # optimizer has real signal to rank on. In-season, when FPL publishes real
     # form again, that is used as-is and this is a no-op.
     predictions = ml_predict_v2.predict_points(available)
+
+    # Two-pass prediction. Pass 1 (above) is cheap and covers everyone. Pass 2
+    # re-scores only realistic candidates using their REAL per-gameweek history,
+    # which is the model's accurate path — one FPL request per player, so it
+    # would be ~486 requests if applied to the whole pool.
+    #
+    # Without this the squad builder silently used season-total rates forever,
+    # while the get_ml_prediction MCP tool used real form — so the two would
+    # disagree once the season started. Pre-season this is a no-op (history is
+    # empty for everyone), and it starts contributing automatically at GW2.
+    if predictions:
+        shortlist = sorted(
+            available,
+            key=lambda p: predictions.get(p["id"], {}).get("predicted_points", 0),
+            reverse=True,
+        )[:60]
+        if any(int(p.get("minutes", 0) or 0) > 0 for p in shortlist):
+            try:
+                refined = await predict_for_players(shortlist, with_history=True)
+                # Only accept refinements that actually used history; otherwise
+                # keep pass 1 rather than overwrite good data with a fallback.
+                for pid, better in refined.items():
+                    if better.get("basis") == "history":
+                        predictions[pid] = better
+            except Exception as e:
+                print(f"⚠️  History-based refinement unavailable, using season rates: {e}")
+
     if predictions and not any(float(p.get("form") or 0) for p in available):
         available = [
             {**p, "form": predictions.get(p["id"], {}).get("predicted_points", 0.0)}
@@ -899,9 +978,67 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
                 "difficulty": fixture.get(diff_key, 3),
             })
 
-    starting_ids = {p["id"] for p in lineup_info.get("starting_11", [])}
+    # Choose the XI explicitly rather than trusting the LP's own split.
+    #
+    # The LP selects the 15 and splits XI/bench in a single solve, optimising
+    # squad value — so it has no notion of "this player is fit enough to own but
+    # not to start". Selecting the 15 and picking who plays are different
+    # decisions with different bars, so the XI is decided here: rank by
+    # (not rotation-risk, predicted points) and fill a legal formation.
+    def start_rank(player: Dict) -> tuple:
+        """
+        Rank by expected value only — deliberately NOT penalising rotation risk.
+
+        FPL auto-substitutes: if a starter doesn't play, a bench player replaces
+        them. So starting a doubtful player is strictly better than benching
+        him — start him and you get his points if he plays and an auto-sub if he
+        doesn't; bench him and you cannot get his points at all. Demoting a
+        rotation risk out of the XI throws away upside for no protection.
+        `predicted_points` already embeds play probability (the model multiplies
+        P(plays) by points-if-plays), so it is the right single ranking key.
+
+        Rotation risk instead matters for BENCH ORDER — see ordered_bench —
+        where a likely-to-play substitute should be first in line.
+        """
+        pred = preds.get(player["id"], {}).get("predicted_points", 0)
+        prob = preds.get(player["id"], {}).get("play_probability") or 0
+        return (pred, prob)
+
+    by_position: Dict[int, List[Dict]] = {1: [], 2: [], 3: [], 4: []}
+    for player in squad:
+        by_position.setdefault(player.get("element_type", 3), []).append(player)
+    for bucket in by_position.values():
+        bucket.sort(key=start_rank, reverse=True)
+
+    # Minimum legal shape, then fill the remaining slots with the best left.
+    starters = (by_position[1][:1] + by_position[2][:3]
+                + by_position[3][:2] + by_position[4][:1])
+    chosen = {p["id"] for p in starters}
+    remaining = sorted(
+        [p for p in squad if p["id"] not in chosen and p.get("element_type") != 1],
+        key=start_rank, reverse=True,
+    )
+    # Respect FPL's per-position maxima while topping up to 11.
+    caps = {2: 5, 3: 5, 4: 3}
+    counts = {pos: len([p for p in starters if p.get("element_type") == pos]) for pos in (1, 2, 3, 4)}
+    for player in remaining:
+        if len(starters) >= 11:
+            break
+        pos = player.get("element_type")
+        if counts.get(pos, 0) < caps.get(pos, 0):
+            starters.append(player)
+            counts[pos] = counts.get(pos, 0) + 1
+
+    starting_ids = {p["id"] for p in starters}
+
+    # Captain must be a STARTER, and here rotation risk IS worth avoiding —
+    # unlike the XI decision above. If the captain doesn't play the armband
+    # passes to the vice, so it isn't a wipeout, but you lose the doubling on
+    # your best pick. Prefer a nailed starter; fall back to the full XI only if
+    # every starter is flagged.
+    captain_pool = [p for p in starters if p["id"] not in rotation_risk_ids] or starters
     captain = max(
-        lineup_info.get("starting_11", []) or squad,
+        captain_pool,
         key=lambda p: preds.get(p["id"], {}).get("predicted_points", 0),
         default=None,
     )
@@ -1704,6 +1841,13 @@ async def get_bot_initial_squad(budget: float = 100.0, num_gameweeks: int = 5):
         # backup keeper can only replace the keeper), then the rest by
         # descending prediction so the likeliest scorer comes on first.
         bench_gks = [p for p in bench if p["position"] == 1]
+        # Best player first, purely by expected points.
+        #
+        # FPL walks the bench IN ORDER — if bench 1 didn't play it tries bench 2,
+        # then 3. So there is no cost to putting a doubtful-but-better player
+        # first: if he plays you get the better score, and if he doesn't the next
+        # man is used automatically. Sorting by play probability instead would
+        # spend your best substitute slot on a lesser player for no gain.
         bench_outfield = sorted(
             [p for p in bench if p["position"] != 1],
             key=lambda p: p["predicted_points"], reverse=True,
