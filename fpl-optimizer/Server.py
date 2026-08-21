@@ -194,6 +194,28 @@ async def make_fpl_request(endpoint: str, params: dict = None) -> dict:
             return {"error": str(e)}
 
 
+def explain_picks_failure(team_id: int, gameweek: int, picks_data: dict) -> str:
+    """
+    Turn a failed picks fetch into something a user can act on.
+
+    FPL only exposes entry/{id}/event/{gw}/picks/ once that gameweek's deadline
+    has passed, so before the season starts EVERY gameweek 404s even for a
+    valid team id. Surfacing the raw "Client error '404 Not Found'" made this
+    look like a broken tool rather than "your squad isn't visible yet".
+    """
+    raw = str(picks_data.get('error', ''))
+    if '404' in raw:
+        return (
+            f"❌ No squad available for team {team_id} in GW{gameweek}.\n\n"
+            "FPL only publishes a team's picks after that gameweek's deadline passes, "
+            "so this is expected before the season starts or if you haven't confirmed "
+            "your squad yet. Once GW1 kicks off this will work.\n\n"
+            "In the meantime, tools that don't need your squad still work — e.g. "
+            "get_ml_prediction, get_team_news, get_injury_report, optimize_squad_lp."
+        )
+    return f"❌ Could not load squad for team {team_id} (GW{gameweek}): {raw}"
+
+
 def format_price(price: int) -> str:
     """Convert price from API format (e.g., 115) to display (£11.5m)"""
     return f"£{price / 10:.1f}m"
@@ -1023,7 +1045,7 @@ async def handle_call_tool(
 
         picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
         if "error" in picks_data:
-            return [types.TextContent(type="text", text=f"❌ Error: {picks_data['error']}")]
+            return [types.TextContent(type="text", text=explain_picks_failure(team_id, gameweek, picks_data))]
 
         manager = f"{team_data.get('player_first_name', '')} {team_data.get('player_last_name', '')}"
         team_name = team_data.get('name', 'Unknown')
@@ -1532,6 +1554,8 @@ async def handle_call_tool(
             # Get user's squad
             team_data = await make_fpl_request(f"entry/{team_id}/")
             picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+            if "error" in picks_data:
+                return [types.TextContent(type="text", text=explain_picks_failure(team_id, gameweek, picks_data))]
 
             squad_players = [players_data[p['element']] for p in picks_data.get('picks', [])]
 
@@ -1594,6 +1618,8 @@ async def handle_call_tool(
 
             # Get squad
             picks_data = await make_fpl_request(f"entry/{team_id}/event/{gameweek}/picks/")
+            if "error" in picks_data:
+                return [types.TextContent(type="text", text=explain_picks_failure(team_id, gameweek, picks_data))]
             squad = [players_data[p['element']] for p in picks_data.get('picks', [])]
 
             # Get fixtures for gameweek
@@ -1787,7 +1813,7 @@ async def handle_call_tool(
 
         picks_data = await make_fpl_request(f"entry/{team_id}/event/{current_gw}/picks/")
         if "error" in picks_data:
-            return [types.TextContent(type="text", text=f"❌ Error: {picks_data['error']}")]
+            return [types.TextContent(type="text", text=explain_picks_failure(team_id, current_gw, picks_data))]
 
         picks = picks_data.get('picks', [])
         bank = (team_data.get('last_deadline_bank', 0) / 10) if team_data.get('last_deadline_bank') else 0.0
