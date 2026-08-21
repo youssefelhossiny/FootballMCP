@@ -797,7 +797,67 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
         or next((e["id"] for e in data.get("events", []) if e.get("is_current")), 1)
 
     # Never build a squad around players who can't play.
-    available = availability_filter.filter_available_players(all_players)
+    #
+    # min_chance=100 rather than the 75 default: the default admits players FPL
+    # itself flags as doubtful (status 'd'). Doku sat at exactly 75% with a calf
+    # injury and passed `chance >= 75`, so he was picked AND made vice-captain.
+    # For a squad you're committing for a whole gameweek, "probably fit" isn't
+    # good enough — anything short of a clean bill of health is excluded.
+    available = availability_filter.filter_available_players(all_players, min_chance=100)
+
+    # Cross-check against third-party team news, which carries signal FPL's own
+    # data does not: a fully fit player who simply isn't in his club's predicted
+    # XI (rotation risk). Without this the optimizer happily picked players the
+    # bookmakers' own lineups had on the bench. Advisory only — if the scrape
+    # fails the squad is still built, just without this filter.
+    excluded_by_news: Dict[str, str] = {}
+    try:
+        news = await fetch_team_news()
+        flagged = set()
+        for entry in news.get("knocks_and_bans", []):
+            status = str(entry.get("status", "")).lower()
+            if "out" in status or "doubt" in status:
+                flagged.add(entry["name"].strip().lower())
+        for team_news in news.get("ffscout", []):
+            for group in ("out", "doubts", "banned"):
+                for raw in team_news.get(group, []):
+                    # strip a trailing "(75%)" and any bracketed first name
+                    name = raw.split("(")[0].strip().lower()
+                    if name:
+                        flagged.add(name)
+
+        def news_flagged(player: Dict) -> Optional[str]:
+            """
+            Match a flagged news name to an FPL player.
+
+            Deliberately EXACT-match only. A substring rule was tried first and
+            was badly wrong in both directions — it matched "White" to
+            "morgan gibbs-white", "Anthony" to "anthony gordon" and "Silva" to
+            "josh dasilva", wrongly excluding 68 fully-fit players. Excluding a
+            good player is as damaging as picking an injured one, so ambiguity
+            resolves to "keep". FPL's own status flag is the safety net for
+            genuine injuries; this filter only adds rotation signal it can be
+            confident about.
+            """
+            web = (player.get("web_name") or "").strip().lower()
+            second = (player.get("second_name") or "").strip().lower()
+            full = f"{player.get('first_name','')} {player.get('second_name','')}".strip().lower()
+            for candidate in (full, second, web):
+                if candidate and candidate in flagged:
+                    return candidate
+            return None
+
+        kept = []
+        for player in available:
+            hit = news_flagged(player)
+            if hit:
+                excluded_by_news[player.get("web_name", "?")] = hit
+            else:
+                kept.append(player)
+        if kept:
+            available = kept
+    except Exception as e:
+        print(f"⚠️  Team-news cross-check unavailable, continuing without it: {e}")
 
     # The optimizer scores every strategy off `player['form']`
     # (enhanced_optimization._calculate_fixture_scores). Pre-season, FPL resets
@@ -889,6 +949,8 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
             key=lambda p: p["predicted_points"], reverse=True,
         )[:6],
         "model": ml_predict_v2.model_info(),
+        # Auditable: who team news removed from consideration, and why.
+        "excluded_by_team_news": excluded_by_news,
     }
 
 
