@@ -276,14 +276,18 @@ class FPLBotManager:
         }
 
         if confirm:
-            try:
-                # FPL library doesn't have direct captain method
-                # Need to use team selection endpoint
-                # For now, log the intention
-                result['confirmed'] = True
-                self._log_action("captain", f"Set captain: {player.web_name}")
-            except Exception as e:
-                result['error'] = str(e)
+            # This used to set confirmed=True and log success WITHOUT making any
+            # request — it reported the captain as set when nothing had changed.
+            # Silently lying about a write to a real team is worse than failing,
+            # so it now refuses and points at the code that actually works.
+            result['confirmed'] = False
+            result['error'] = (
+                "set_captain is not implemented here. This class authenticates via "
+                "users.premierleague.com, which no longer exists (FPL moved to SSO). "
+                "Use fpl_auth.set_lineup(team_id, picks), which sets captain and "
+                "vice-captain through the documented /api/my-team/{id}/ endpoint."
+            )
+            self._log_action("captain_refused", f"Refused to fake setting captain: {player.web_name}")
 
         return result
 

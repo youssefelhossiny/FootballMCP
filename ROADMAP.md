@@ -475,21 +475,57 @@ background-refresh infra would already be there for other reasons).
 
 ---
 
-## TASK 5 — Autonomous bot: initial squad + auto-submit  ⬜ (GW1 window is a test-bed)
-**Verified state:** `bot_decision_maker.py` = read-only recommender (no initial-squad logic).
-`bot_manager.py` = dormant, the only write-capable code, uses `fpl` lib (**not installed / not in
-requirements**); `set_captain` is a stub. No scheduler anywhere.
+## TASK 5 — Autonomous bot: initial squad + auto-submit  ✅ (auth path replaced; see below)
 
-**User decisions:** try full auto-submit for GW1 as a test (unlimited edits pre-deadline); if login
-unreliable, do GW1 manually and finish after. GW2+: **fully automatic + notify the user on failure.**
+### ⚠️ The original plan was built on a dead endpoint
+Item 3 ("replay `login()` session cookies") **cannot work**, and neither can anything else based on
+email/password. Verified directly:
+- **`users.premierleague.com` no longer resolves at all** (no DNS). That is the host `bot_manager.
+  login()` POSTs credentials to. `fantasy.` and `account.premierleague.com` both resolve fine.
+- FPL moved to **PingFederate/PingOne SSO**. The live OIDC discovery document at
+  `account.premierleague.com/as/.well-known/openid-configuration` advertises
+  `authorization_code, implicit, client_credentials, refresh_token, device_code, ciba, token-exchange`
+  — **no `password` grant**, so credentials can never be exchanged for a token. Repairing `login()`
+  is not possible; the mechanism it depends on is gone.
 
-1. `build_initial_squad()` in bot path — reuse `EnhancedOptimizer.optimize_squad_with_fixtures`
-   (`enhanced_optimization.py:124`) + `AvailabilityFilter.filter_available_players`. Captain via
-   extracted `_score_captain_candidate`. Expose `GET /api/bot/initial-squad` (read-only review).
-2. Add `fpl` + `apscheduler` to requirements. `FPLBotManager` reads env creds (drop `bot_config.json`).
-3. `submit_initial_squad()` + real `set_captain()` via raw authenticated POST (replay `login()`
-   session cookies + CSRF/headers). Modes via `BOT_MODE`: `notify` (default) / `dry_run` / `auto`.
-4. Test tonight: `dry_run` → `auto` against real team. Fallback: `notify` + manual apply.
+What *does* work, verified live:
+- The `refresh_token` grant is real — `POST /as/token` with a deliberately invalid token returns a
+  clean OAuth `invalid_grant`, proving the endpoint accepts that grant for FPL's public client id.
+- The write endpoints are alive and only lack a session: `POST /api/transfers/` and
+  `POST /api/my-team/{id}/` both return DRF `403 "Authentication credentials were not provided."`
+  (not 404, not a bot-block). No Cloudflare on the FPL API host (`server: openresty`).
+- **No documented endpoint exists for submitting an initial 15-player squad.** Transfers and
+  lineup/captain are documented; first-squad creation is not — so that step stays manual.
+
+### What shipped
+1. **`GET /api/bot/initial-squad`** — a full reviewable opening squad, read-only. Reuses
+   `build_optimal_squad` (EnhancedOptimizer + `AvailabilityFilter` + the v2 model) and adds what you
+   need to enter it by hand: bench order (backup GK forced to bench slot 1, then outfield by
+   descending prediction), a vice-captain (best predicted starter who isn't captain), and a
+   per-pick justification (prediction, start probability, fixture, differential flag). Verified:
+   legal 3-5-2, exactly £100.0m, 3-per-club respected, captain B.Fernandes / vice Cherki.
+2. **`fpl_auth.py`** — authenticated writes via a **browser-extracted refresh token**, so the
+   password is never stored or seen by this project. Exchanges for short-lived access tokens and
+   persists the rotated refresh token (FPL rotates on every use — losing it breaks the chain).
+   Implements `set_lineup` (captain/vice/order via `/api/my-team/{id}/`) and `make_transfers`
+   (validate with `confirmed=false`, then commit — so a rejected transfer never half-applies).
+3. **Safety gating** via `FPL_BOT_MODE`, defaulting to the safest value:
+   `notify` (default, never writes) / `dry_run` (authenticates + validates, never commits) /
+   `auto` (writes). Verified: `notify` returns the intended change without writing; malformed
+   payloads are rejected locally (wrong pick count, not exactly one captain); an invalid token fails
+   with an actionable message even in `auto`. `GET /api/bot/auth-status` reports mode + whether
+   writes are possible without attempting one.
+4. **Removed a dangerous lie.** `bot_manager.set_captain(confirm=True)` previously set
+   `confirmed: True` and logged success **without issuing any request** — it reported the captain as
+   set when nothing had changed. It now refuses and points at `fpl_auth.set_lineup`.
+5. `apscheduler` added to requirements. **`fpl` deliberately NOT added** — it is dead code aimed at a
+   host that no longer exists; a comment in requirements.txt records why.
+
+**Residual risk (honest):** the refresh-token flow depends on an undocumented (though publicly
+visible) client id, Cloudflare bot management sits on the auth host, and FPL re-enabled optional 2FA
+for 2025/26 — any of these can break it. Refresh tokens rotate and can be revoked, so expect
+occasional manual re-copying from the browser. Treat unattended auto-submit as a best-effort
+convenience layer, never as a guarantee that a deadline was met.
 
 ---
 

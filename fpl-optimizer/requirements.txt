@@ -39,3 +39,10 @@ PyJWT>=2.8.0                 # JWT token handling
 
 # Anthropic Claude API
 anthropic>=0.18.0            # Claude API client
+
+# Autonomous bot
+apscheduler>=3.10.0          # deadline scheduling (Task 6)
+# NOTE: the `fpl` library is deliberately NOT a dependency. Its login() POSTs
+# credentials to users.premierleague.com, which no longer resolves — FPL moved
+# to PingFederate SSO, whose OAuth server exposes no password grant. Writes go
+# through fpl_auth.py (browser-extracted refresh token) instead.

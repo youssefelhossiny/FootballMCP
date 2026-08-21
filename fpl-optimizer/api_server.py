@@ -45,6 +45,7 @@ from data_sources.availability_filter import AvailabilityFilter
 from data_sources.team_news_scraper import fetch_knocks_and_bans, fetch_ffscout_team_news
 from data_sources.data_cache import DataCache
 import ml_predict_v2
+import fpl_auth
 from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
 from chips_strategy import ChipsStrategyAnalyzer
 
@@ -1604,6 +1605,100 @@ async def get_user_team(team_id: int):
 # ============== BOT TEAM ENDPOINT ==============
 # Bot's FPL team ID - hardcoded for the autonomous bot
 BOT_TEAM_ID = int(os.getenv("BOT_TEAM_ID", "12777515"))
+
+@app.get("/api/bot/auth-status")
+async def get_bot_auth_status():
+    """
+    Whether authenticated FPL writes are possible, and in which mode.
+
+    Read-only and never throws — the point is to diagnose auth without
+    attempting a write.
+    """
+    return fpl_auth.auth_status()
+
+
+@app.get("/api/bot/initial-squad")
+async def get_bot_initial_squad(budget: float = 100.0, num_gameweeks: int = 5):
+    """
+    Build a full 15-player opening squad for review — read-only, submits nothing.
+
+    Reuses build_optimal_squad (EnhancedOptimizer + AvailabilityFilter + the v2
+    points model) and adds what you need to actually enter a squad by hand:
+    bench order, a vice-captain, and a per-pick justification.
+
+    Deliberately read-only. FPL has no documented endpoint for submitting a
+    first 15-player squad (transfers and lineup do have documented endpoints,
+    initial squad creation does not), so this produces a squad for a human to
+    apply rather than pretending it can submit one.
+    """
+    try:
+        squad = await build_optimal_squad("wildcard", budget, max(1, min(num_gameweeks, 10)))
+        players = squad["players"]
+
+        starting = [p for p in players if p["is_starting"]]
+        bench = [p for p in players if not p["is_starting"]]
+
+        # Bench order: GK always sits at bench slot 1 (FPL convention — the
+        # backup keeper can only replace the keeper), then the rest by
+        # descending prediction so the likeliest scorer comes on first.
+        bench_gks = [p for p in bench if p["position"] == 1]
+        bench_outfield = sorted(
+            [p for p in bench if p["position"] != 1],
+            key=lambda p: p["predicted_points"], reverse=True,
+        )
+        ordered_bench = bench_gks + bench_outfield
+
+        # Vice-captain: best predicted starter who isn't the captain. Guards
+        # against the captain being a late withdrawal.
+        captain = next((p for p in players if p["is_captain"]), None)
+        vice = next(
+            (p for p in sorted(starting, key=lambda p: p["predicted_points"], reverse=True)
+             if not captain or p["id"] != captain["id"]),
+            None,
+        )
+
+        def justify(p: Dict) -> str:
+            bits = [f"{p['predicted_points']} pred pts"]
+            if p.get("play_probability") is not None:
+                bits.append(f"{int(p['play_probability'] * 100)}% to start")
+            if p.get("next_opponent"):
+                bits.append(f"vs {p['next_opponent']} (FDR {p['fixture_difficulty']})")
+            if p["ownership"] < 5.0:
+                bits.append(f"differential, {p['ownership']:.1f}% owned")
+            return " · ".join(bits)
+
+        return {
+            "gameweek": squad["gameweek"],
+            "formation": squad["formation"],
+            "total_cost": squad["total_cost"],
+            "total_cost_m": round(squad["total_cost"] / 10, 1),
+            "budget_remaining_m": round(budget - squad["total_cost"] / 10, 1),
+            "predicted_points": squad["predicted_points"],
+            "avg_fixture_difficulty": squad["avg_fixture_difficulty"],
+            "captain": {"id": captain["id"], "name": captain["name"]} if captain else None,
+            "vice_captain": {"id": vice["id"], "name": vice["name"]} if vice else None,
+            "starting_xi": [
+                {**p, "justification": justify(p)}
+                for p in sorted(starting, key=lambda p: (p["position"], -p["predicted_points"]))
+            ],
+            "bench": [
+                {**p, "bench_order": i + 1, "justification": justify(p)}
+                for i, p in enumerate(ordered_bench)
+            ],
+            "model": squad["model"],
+            "submission": {
+                "automated": False,
+                "reason": (
+                    "FPL publishes no documented endpoint for creating an initial 15-player "
+                    "squad, so this must be entered manually in the FPL app or site."
+                ),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/bot/team")
 async def get_bot_team():
