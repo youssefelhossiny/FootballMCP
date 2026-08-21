@@ -42,6 +42,9 @@ from anthropic_chat import query_anthropic
 from enhanced_features import EnhancedDataCollector
 from predict_points import FPLPointsPredictor
 from data_sources.availability_filter import AvailabilityFilter
+from data_sources.team_news_scraper import fetch_knocks_and_bans, fetch_ffscout_team_news
+from data_sources.data_cache import DataCache
+import ml_predict_v2
 from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
 from chips_strategy import ChipsStrategyAnalyzer
 
@@ -68,10 +71,19 @@ app.add_middleware(
 
 # Global instances - matching MCP Server
 enhanced_collector = EnhancedDataCollector()
+# v1 predictor. Retained only for the FPLOptimizer/LP helpers that live in the
+# same module; it serves NO predictions here — points projections now come from
+# ml_predict_v2 (see /api/predictions and the get_ml_prediction tool). v1's
+# model was trained on a synthetic label and is not loaded at startup.
 predictor = FPLPointsPredictor()
 availability_filter = AvailabilityFilter()
 fixture_analyzer = FixtureAnalyzer()
+enhanced_optimizer = EnhancedOptimizer()
 chips_analyzer = ChipsStrategyAnalyzer()
+# Short TTL: these sources claim near-real-time updates, so a stale multi-hour
+# cache (like the 6h default) would defeat the point of using them over FPL's
+# own slower-updating bootstrap-static news field.
+team_news_cache = DataCache(cache_dir=str(Path(__file__).parent / "cache"), ttl_hours=0.25)
 
 # FPL API Configuration
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
@@ -392,6 +404,67 @@ FPL_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_ml_prediction",
+            "description": "Get machine-learning predicted points for the NEXT gameweek, plus the probability each player actually starts (60+ minutes). Trained on real historical per-gameweek outcomes across three seasons. Use this as ONE input among several when advising on transfers, captaincy or lineups — it is a useful ranking signal (its top picks historically averaged ~1.5 more points per pick than a recent-form heuristic) but it deliberately under-predicts big hauls, so treat it as 'who is likely to do well', not 'exactly how many points'. Always weigh it against injury/team news and fixtures rather than following it blindly. Pass player_names to score specific players (this fetches their real gameweek history for a more accurate answer), or omit to get the top-ranked players overall.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "player_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific players to predict (e.g. ['Haaland','Saka']). More accurate than the ranked list, as it uses each player's real per-gameweek history."
+                    },
+                    "position": {
+                        "type": "string",
+                        "enum": ["all", "GK", "DEF", "MID", "FWD"],
+                        "description": "Restrict the ranked list to one position (ignored when player_names is given)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many players to return in the ranked list (default 10, max 30)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_team_news",
+            "description": "Get fast, near-real-time team news from third-party FPL sources (Knocks and Bans + Fantasy Football Scout) — faster-updating than FPL's own official injury data, which can lag actual announcements by a day or more. Returns predicted starting lineups, rotation-risk/doubt/out/banned players per team, and injury status with expected return dates. Use this instead of (or alongside) get_injury_report when the user wants the most current team news, or asks 'who's likely to start' / 'is X going to play' / 'any team news on Y'. Can filter to one team.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "description": "Filter to one team's news (optional, e.g., 'Arsenal', 'Liverpool')"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_injury_report",
+            "description": "Get a report of injured, suspended, and doubtful Premier League players, based on FPL's official status/news/chance-of-playing data. Use this before recommending transfers, captains, or lineups so injury risk is factored in — a doubtful or injured player shouldn't be started or captained even if their underlying stats look good. Can filter to a specific team.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "description": "Filter to one team's players (optional, e.g., 'Arsenal', 'Liverpool')"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "make_transfer",
             "description": "Execute a transfer in the theoretical lineup by swapping player_out for player_in. This updates the visual squad display in the frontend WITHOUT making actual FPL transfers. Use this when: 1) User explicitly agrees to a suggested transfer, 2) User asks to 'replace X with Y' or 'swap X for Y', 3) User says 'do it' or 'make that transfer' after a suggestion. Always include a brief reason. The frontend will show the updated theoretical squad.",
             "parameters": {
@@ -494,16 +567,440 @@ async def fetch_enhanced_players() -> tuple:
     return enhanced_players, teams, data
 
 
+async def fetch_team_news(use_cache: bool = True) -> Dict:
+    """
+    Fetch fast third-party injury + predicted-lineup news (Knocks and Bans +
+    FFScout team news), cached for team_news_cache's TTL (15 min) since these
+    sources update roughly in real time — no point re-scraping on every call.
+    """
+    cache_key = "team_news"
+    if use_cache:
+        cached = team_news_cache.get(cache_key, format="json")
+        if cached:
+            return cached
+
+    ssl_context = get_ssl_context()
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        try:
+            knocks_and_bans, ffscout = await asyncio.gather(
+                fetch_knocks_and_bans(session),
+                fetch_ffscout_team_news(session),
+            )
+        except Exception as e:
+            print(f"Warning: Failed to fetch team news: {e}")
+            knocks_and_bans, ffscout = [], []
+
+    result = {"knocks_and_bans": knocks_and_bans, "ffscout": ffscout}
+    if knocks_and_bans or ffscout:
+        team_news_cache.set(cache_key, result, format="json")
+    return result
+
+
+# ============== DATA MATCHING REPORT ==============
+@app.get("/api/data/match-report")
+async def get_match_report(team: Optional[int] = None):
+    """
+    Per-source (Understat/FBRef) player match rate + unmatched player list.
+
+    A player unmatched across sources has no advanced xG/xA/defensive stats,
+    so this tracks how close matching is to ~100% coverage. Triggers a fresh
+    enhanced-data collection pass (same pipeline as /api/players) so the
+    report always reflects the current cache/season state.
+
+    Args:
+        team: optional FPL team ID to filter the unmatched lists to one team
+            (e.g. 7/11/12 for the promoted teams Coventry/Hull/Ipswich)
+    """
+    try:
+        players, teams, data = await fetch_enhanced_players()
+        if "error" in data:
+            raise HTTPException(status_code=500, detail=data["error"])
+
+        report_path = Path(__file__).parent / "cache" / "unmatched_players.json"
+        if not report_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="No match report available yet — run a data collection pass first"
+            )
+
+        with open(report_path, 'r') as f:
+            report = json.load(f)
+
+        def _enrich(p: Dict) -> Dict:
+            team_info = teams.get(p.get('team', 0), {})
+            return {
+                **p,
+                'team_name': team_info.get('name', ''),
+                'team_short_name': team_info.get('short_name', ''),
+            }
+
+        understat_unmatched = [_enrich(p) for p in report.get('understat_unmatched', [])]
+        fbref_unmatched = [_enrich(p) for p in report.get('fbref_unmatched', [])]
+
+        if team is not None:
+            understat_unmatched = [p for p in understat_unmatched if p.get('team') == team]
+            fbref_unmatched = [p for p in fbref_unmatched if p.get('team') == team]
+
+        return {
+            "season": report.get('season'),
+            "total_fpl_players": report.get('total_fpl_players', 0),
+            "understat_match_rate": report.get('understat_match_rate', 0.0),
+            "fbref_match_rate": report.get('fbref_match_rate', 0.0),
+            "understat_unmatched_count": len(understat_unmatched),
+            "fbref_unmatched_count": len(fbref_unmatched),
+            "understat_unmatched": understat_unmatched,
+            "fbref_unmatched": fbref_unmatched,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== ML PREDICTIONS (v2) ==============
+async def fetch_player_histories(player_ids: List[int], max_concurrent: int = 8) -> Dict[int, List[Dict]]:
+    """
+    Fetch per-GW history for specific players from element-summary.
+
+    The v2 model's features are rolling means over prior gameweeks, so this is
+    what enables the accurate serving path. One request per player, so it's
+    only worth doing for a shortlist (a squad, a comparison set) — never for
+    all ~600 players on a chat request. Concurrency is capped to stay polite
+    to the FPL API; failures degrade to no-history (season-total fallback)
+    rather than failing the whole request.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def one(pid: int):
+        async with semaphore:
+            data = await make_fpl_request(f"element-summary/{pid}/")
+            if isinstance(data, dict) and "error" not in data:
+                return pid, data.get("history", []) or []
+            return pid, []
+
+    results = await asyncio.gather(*(one(p) for p in player_ids), return_exceptions=True)
+    out: Dict[int, List[Dict]] = {}
+    for item in results:
+        if isinstance(item, tuple):
+            pid, history = item
+            if history:
+                out[pid] = history
+    return out
+
+
+async def predict_for_players(players: List[Dict], with_history: bool = False) -> Dict[int, Dict]:
+    """Run the v2 model over `players`, optionally pulling real per-GW history first."""
+    histories = {}
+    if with_history and players:
+        histories = await fetch_player_histories([p["id"] for p in players])
+    return ml_predict_v2.predict_points(players, histories)
+
+
+@app.get("/api/predictions")
+async def get_predictions(
+    limit: int = 20,
+    position: Optional[str] = None,
+    team: Optional[int] = None,
+    with_history: bool = False,
+):
+    """
+    Next-gameweek predicted points from the v2 model.
+
+    Args:
+        limit: how many players to return (ranked by prediction, max 100)
+        position: GK/DEF/MID/FWD filter
+        team: FPL team id filter
+        with_history: fetch real per-GW history for the returned shortlist,
+            giving the accurate rolling-window prediction instead of the
+            season-total fallback. Costs one FPL request per player, so it
+            runs AFTER filtering/ranking, not before.
+    """
+    try:
+        info = ml_predict_v2.model_info()
+        if not info["available"]:
+            raise HTTPException(status_code=503, detail="v2 points model not available on this deploy")
+
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            raise HTTPException(status_code=500, detail=data["error"])
+
+        players = data.get("elements", [])
+        teams = {t["id"]: t for t in data.get("teams", [])}
+
+        if position:
+            wanted = POSITIONS_REV.get(position.upper())
+            if wanted:
+                players = [p for p in players if p.get("element_type") == wanted]
+        if team is not None:
+            players = [p for p in players if p.get("team") == team]
+
+        preds = ml_predict_v2.predict_points(players)
+        ranked = sorted(players, key=lambda p: preds.get(p["id"], {}).get("predicted_points", 0), reverse=True)
+        shortlist = ranked[:max(1, min(limit, 100))]
+
+        # Re-predict the shortlist with real history for a better answer.
+        if with_history:
+            better = await predict_for_players(shortlist, with_history=True)
+            preds.update(better)
+            shortlist = sorted(shortlist, key=lambda p: preds[p["id"]]["predicted_points"], reverse=True)
+
+        return {
+            "model": info,
+            "count": len(shortlist),
+            "predictions": [
+                {
+                    "id": p["id"],
+                    "web_name": p.get("web_name"),
+                    "team": teams.get(p.get("team", 0), {}).get("short_name", ""),
+                    "position": POSITIONS.get(p.get("element_type", 0), ""),
+                    "price": p.get("now_cost", 0) / 10,
+                    **preds.get(p["id"], {}),
+                }
+                for p in shortlist
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== OPTIMAL SQUADS (wildcard / free hit) ==============
+async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dict:
+    """
+    Build an optimal £100m squad and shape it for WeeklyPicksPage.jsx.
+
+    The response contract is dictated by the existing frontend, which had been
+    calling /api/optimal/{wildcard,freehit} against routes that never existed.
+    Two easy-to-get-wrong details, both matched deliberately:
+      * `player.price` and `total_cost` are read as TENTHS (the JSX divides
+        each by 10), even though the optimizer works in millions.
+      * `player.position` must be the NUMERIC element_type — getPositionShort()
+        maps {1:GK,2:DEF,3:MID,4:FWD} and renders '?' for a string.
+
+    Wildcard optimizes over a multi-gameweek fixture horizon; free hit uses a
+    single gameweek, since it's a one-week squad.
+    """
+    data = await make_fpl_request("bootstrap-static/")
+    fixtures_data = await make_fpl_request("fixtures/")
+    if "error" in data:
+        raise HTTPException(status_code=502, detail=f"FPL API error: {data['error']}")
+    if isinstance(fixtures_data, dict) and "error" in fixtures_data:
+        raise HTTPException(status_code=502, detail=f"FPL fixtures error: {fixtures_data['error']}")
+
+    all_players = data.get("elements", [])
+    teams = {t["id"]: t for t in data.get("teams", [])}
+    current_gw = next((e["id"] for e in data.get("events", []) if e.get("is_next")), None) \
+        or next((e["id"] for e in data.get("events", []) if e.get("is_current")), 1)
+
+    # Never build a squad around players who can't play.
+    available = availability_filter.filter_available_players(all_players)
+
+    # The optimizer scores every strategy off `player['form']`
+    # (enhanced_optimization._calculate_fixture_scores). Pre-season, FPL resets
+    # form to 0.0 for ALL players — verified: 0/599 nonzero — so every score
+    # floors to 0.01 and the "optimal" squad is arbitrary and identical for
+    # every strategy. Seed `form` with the v2 model's predicted points so the
+    # optimizer has real signal to rank on. In-season, when FPL publishes real
+    # form again, that is used as-is and this is a no-op.
+    predictions = ml_predict_v2.predict_points(available)
+    if predictions and not any(float(p.get("form") or 0) for p in available):
+        available = [
+            {**p, "form": predictions.get(p["id"], {}).get("predicted_points", 0.0)}
+            for p in available
+        ]
+
+    squad, lineup_info, status = enhanced_optimizer.optimize_squad_with_fixtures(
+        players=available,
+        fixtures=fixtures_data,
+        teams=teams,
+        current_gw=current_gw,
+        budget=budget,
+        optimize_for="fixtures" if strategy == "wildcard" else "form",
+        target_spend=budget,
+        num_gws=num_gws,
+    )
+    if not squad:
+        raise HTTPException(status_code=422, detail=f"Could not build a squad: {status}")
+
+    preds = predictions
+
+    next_fixture = {}
+    for fixture in (fixtures_data or []):
+        if fixture.get("event") != current_gw:
+            continue
+        for side, opp_side, diff_key in (("team_h", "team_a", "team_h_difficulty"),
+                                         ("team_a", "team_h", "team_a_difficulty")):
+            next_fixture.setdefault(fixture[side], {
+                "opponent": teams.get(fixture[opp_side], {}).get("short_name", "?"),
+                "difficulty": fixture.get(diff_key, 3),
+            })
+
+    starting_ids = {p["id"] for p in lineup_info.get("starting_11", [])}
+    captain = max(
+        lineup_info.get("starting_11", []) or squad,
+        key=lambda p: preds.get(p["id"], {}).get("predicted_points", 0),
+        default=None,
+    )
+
+    # Report FPL's real form, never the seeded value above, so the UI's Form
+    # column stays truthful even when the optimizer ran on predictions.
+    real_form = {p["id"]: p.get("form", "0") for p in all_players}
+
+    def shape(player: Dict) -> Dict:
+        fixture = next_fixture.get(player.get("team"), {})
+        prediction = preds.get(player["id"], {})
+        return {
+            "id": player["id"],
+            "name": player.get("web_name", ""),
+            "team": teams.get(player.get("team", 0), {}).get("short_name", ""),
+            "position": player.get("element_type"),          # numeric — see docstring
+            "price": player.get("now_cost", 0),              # tenths — see docstring
+            "form": real_form.get(player["id"], "0"),
+            "predicted_points": prediction.get("predicted_points", 0.0),
+            "play_probability": prediction.get("play_probability"),
+            "next_opponent": fixture.get("opponent", "TBC"),
+            "fixture_difficulty": fixture.get("difficulty", 3),
+            "is_captain": bool(captain and player["id"] == captain["id"]),
+            "is_starting": player["id"] in starting_ids,
+            "ownership": float(player.get("selected_by_percent", 0) or 0),
+        }
+
+    players_out = [shape(p) for p in squad]
+    difficulties = [p["fixture_difficulty"] for p in players_out if p["fixture_difficulty"]]
+
+    return {
+        "strategy": strategy,
+        "gameweek": current_gw,
+        "formation": lineup_info.get("formation"),
+        "status": status,
+        # Sum of ML predictions across the starting XI — what the UI labels
+        # "Predicted Points". The optimizer's own expected_points uses a
+        # different (heuristic) scale, so mixing them would be misleading.
+        "predicted_points": round(sum(p["predicted_points"] for p in players_out if p["is_starting"]), 1),
+        "total_cost": sum(p["price"] for p in players_out),   # tenths
+        "avg_fixture_difficulty": round(sum(difficulties) / len(difficulties), 2) if difficulties else None,
+        "players": players_out,
+        "differentials": sorted(
+            [p for p in players_out if p["ownership"] < 5.0],
+            key=lambda p: p["predicted_points"], reverse=True,
+        )[:6],
+        "model": ml_predict_v2.model_info(),
+    }
+
+
+@app.get("/api/optimal/wildcard")
+async def get_optimal_wildcard(budget: float = 100.0, num_gameweeks: int = 5):
+    """Best £100m squad for a Wildcard — optimized across a multi-GW fixture horizon."""
+    try:
+        return await build_optimal_squad("wildcard", budget, max(1, min(num_gameweeks, 10)))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/optimal/freehit")
+async def get_optimal_freehit(budget: float = 100.0):
+    """Best £100m squad for a Free Hit — single gameweek only."""
+    try:
+        return await build_optimal_squad("freehit", budget, 1)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== INJURY REPORT ==============
+@app.get("/api/injuries")
+async def get_injuries(team: Optional[int] = None):
+    """
+    Injured/suspended/doubtful player report, from FPL's own status/news/
+    chance-of-playing fields (no external source — always live).
+
+    Args:
+        team: optional FPL team ID to filter to one team
+    """
+    try:
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            raise HTTPException(status_code=500, detail=data["error"])
+
+        players = data.get('elements', [])
+        teams = {t['id']: t for t in data.get('teams', [])}
+
+        if team is not None:
+            players = [p for p in players if p.get('team') == team]
+
+        report = availability_filter.get_injury_report(players)
+
+        def _enrich(p: Dict) -> Dict:
+            team_info = teams.get(p.get('team', 0), {})
+            return {
+                **p,
+                'team_name': team_info.get('name', ''),
+                'team_short_name': team_info.get('short_name', ''),
+            }
+
+        return {
+            category: [_enrich(p) for p in entries]
+            for category, entries in report.items()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== TEAM NEWS (fast third-party source) ==============
+@app.get("/api/team-news")
+async def get_team_news_endpoint(team: Optional[str] = None):
+    """
+    Fast, near-real-time team news from Knocks and Bans (injury/suspension
+    status) + Fantasy Football Scout (predicted lineups, rotation risk) —
+    both update faster than FPL's own bootstrap-static news field. Cached
+    15 min server-side.
+
+    Args:
+        team: optional team name substring to filter FFScout's per-team
+            lineup/out/doubts/banned lists (Knocks and Bans entries aren't
+            team-tagged, so that list is always returned in full)
+    """
+    try:
+        news = await fetch_team_news()
+        ffscout = news.get("ffscout", [])
+        if team:
+            team_lower = team.lower()
+            ffscout = [t for t in ffscout if team_lower in t['team'].lower()]
+
+        return {
+            "knocks_and_bans": news.get("knocks_and_bans", []),
+            "ffscout": ffscout,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize models and fetch initial data"""
     print("Starting FPL Optimizer API v2.0 with full MCP integration...")
 
-    # Load prediction model if exists
-    model_path = Path(__file__).parent / "models" / "points_model.pkl"
-    if model_path.exists():
-        predictor.load_model(str(model_path))
-        print("Loaded prediction model")
+    # v2 points model (two-stage hurdle, trained on real per-GW outcomes).
+    # Two bugs previously lived here: the path pointed at fpl-optimizer/models/
+    # while the models actually live at repo-root models/, and load_model() was
+    # called with an argument despite taking none — so v1 never loaded at all
+    # and the TypeError never even surfaced.
+    info = ml_predict_v2.model_info()
+    if info["available"]:
+        print(f"Loaded points model {info['version']} "
+              f"({info['n_features']} features, {info['architecture']})")
+    else:
+        print(f"⚠️  No v2 points model at {info['path']} — "
+              "predictions unavailable (run: python ml_train.py)")
 
     print("API ready with all MCP tools!")
 
@@ -515,7 +1012,8 @@ async def health_check():
         "status": "healthy",
         "version": "2.0.0",
         "mcp_tools": "integrated",
-        "auth_configured": check_auth_configured()
+        "auth_configured": check_auth_configured(),
+        "points_model": ml_predict_v2.model_info(),
     }
 
 
@@ -1808,6 +2306,24 @@ async def execute_tool(tool_name: str, args: Dict, players: List[Dict], teams: D
             reason = args.get("reason", "")
             return await tool_make_transfer(player_out, player_in, reason, players, teams, team_data)
 
+        # === get_injury_report - Injured/suspended/doubtful players ===
+        elif tool_name == "get_injury_report":
+            team_filter = args.get("team")
+            return tool_get_injury_report(players, teams, team_filter)
+
+        # === get_team_news - Fast third-party injury + lineup news ===
+        elif tool_name == "get_team_news":
+            team_filter = args.get("team")
+            return await tool_get_team_news(team_filter)
+
+        # === get_ml_prediction - v2 model predicted points ===
+        elif tool_name == "get_ml_prediction":
+            names = args.get("player_names") or []
+            position = args.get("position", "all")
+            limit_val = args.get("limit", 10)
+            limit = min(int(limit_val) if limit_val else 10, 30)
+            return await tool_get_ml_prediction(names, position, limit, players, teams)
+
         else:
             return f"Unknown tool: {tool_name}"
 
@@ -1933,6 +2449,91 @@ async def tool_analyze_fixtures(num_gws: int) -> str:
         team = teams_dict.get(team_id, {})
         rating = "Easy" if avg_fdr <= 2.5 else "Medium" if avg_fdr <= 3.5 else "Hard"
         lines.append(f"{i}. **{team.get('short_name', '?')}** - Avg FDR: {avg_fdr:.2f} ({rating})")
+
+    return "\n".join(lines)
+
+
+def tool_get_injury_report(players: List[Dict], teams: Dict, team_filter: Optional[str] = None) -> str:
+    """Get injured/suspended/doubtful player report"""
+    filtered_players = players
+    if team_filter:
+        team_lower = team_filter.lower()
+        team_ids = [t['id'] for t in teams.values() if team_lower in t.get('name', '').lower() or team_lower in t.get('short_name', '').lower()]
+        filtered_players = [p for p in players if p.get('team') in team_ids]
+
+    report = availability_filter.get_injury_report(filtered_players)
+
+    lines = [f"**Injury Report**" + (f" for {team_filter}" if team_filter else "") + ":"]
+
+    section_labels = [
+        ("injured", "🔴 Injured"),
+        ("suspended", "🟠 Suspended"),
+        ("doubtful", "🟡 Doubtful"),
+    ]
+    any_concerns = False
+    for key, label in section_labels:
+        entries = report.get(key, [])
+        if not entries:
+            continue
+        any_concerns = True
+        lines.append(f"\n**{label}** ({len(entries)}):")
+        for p in entries[:20]:
+            team_name = teams.get(p.get('team', 0), {}).get('short_name', '?')
+            chance = p.get('chance')
+            chance_str = f"{chance}% chance" if chance is not None else "no % given"
+            news = p.get('news') or "no details"
+            lines.append(f"  {p.get('web_name')} ({team_name}) - {chance_str} - {news}")
+        if len(entries) > 20:
+            lines.append(f"  ... and {len(entries) - 20} more")
+
+    if not any_concerns:
+        lines.append("\nNo injury/suspension/doubt concerns found" + (f" for {team_filter}" if team_filter else "") + ".")
+
+    return "\n".join(lines)
+
+
+async def tool_get_team_news(team_filter: Optional[str] = None) -> str:
+    """Get fast third-party team news (Knocks and Bans + FFScout)"""
+    news = await fetch_team_news()
+    knocks_and_bans = news.get("knocks_and_bans", [])
+    ffscout = news.get("ffscout", [])
+
+    if not knocks_and_bans and not ffscout:
+        return "Team news sources are temporarily unavailable — fall back to get_injury_report for FPL's own data."
+
+    lines = ["**Team News (third-party, faster-updating than FPL's own data)**"]
+
+    if ffscout:
+        teams_to_show = ffscout
+        if team_filter:
+            team_lower = team_filter.lower()
+            teams_to_show = [t for t in ffscout if team_lower in t['team'].lower()]
+        for t in teams_to_show:
+            lines.append(f"\n**{t['team']}**" + (f" (updated: {t['last_updated']})" if t.get('last_updated') else "") + ":")
+            if t['predicted_lineup']:
+                lines.append(f"  Predicted XI: {', '.join(t['predicted_lineup'])}")
+            if t['out']:
+                lines.append(f"  Out: {', '.join(t['out'])}")
+            if t['doubts']:
+                lines.append(f"  Doubts: {', '.join(t['doubts'])}")
+            if t['banned']:
+                lines.append(f"  Banned: {', '.join(t['banned'])}")
+
+    if knocks_and_bans:
+        entries_to_show = knocks_and_bans
+        if team_filter:
+            # Knocks and Bans entries aren't team-tagged, so this source is
+            # skipped when filtering by team — FFScout above already covers
+            # the per-team Out/Doubts/Banned lists.
+            entries_to_show = []
+        if entries_to_show:
+            lines.append(f"\n**Injury/Suspension Status (all teams, {len(entries_to_show)} entries)**:")
+            for e in entries_to_show[:30]:
+                detail = e['injury_type'] or "no details"
+                return_str = f", est. return {e['expected_return']}" if e.get('expected_return') else ""
+                lines.append(f"  {e['name']} - {e['status']} - {detail}{return_str}")
+            if len(entries_to_show) > 30:
+                lines.append(f"  ... and {len(entries_to_show) - 30} more")
 
     return "\n".join(lines)
 
@@ -2093,6 +2694,69 @@ def tool_suggest_transfers(players: List[Dict], teams: Dict, team_data: Optional
         pos = POSITIONS.get(p.get('element_type', 0), '?')
         lines.append(f"{i}. **{p.get('web_name')}** ({team_name}, {pos}) - £{p.get('now_cost', 0)/10:.1f}m | Form: {p.get('form')} | xG: {p.get('xG', 0):.1f}")
 
+    return "\n".join(lines)
+
+
+async def tool_get_ml_prediction(
+    player_names: List[str],
+    position: str,
+    limit: int,
+    players: List[Dict],
+    teams: Dict,
+) -> str:
+    """v2 model predicted points, either for named players or as a ranked list."""
+    info = ml_predict_v2.model_info()
+    if not info["available"]:
+        return ("The ML prediction model isn't available on this deployment, so I can't give "
+                "model-based projections. Other signals (form, fixtures, team news) still work.")
+
+    if player_names:
+        selected = []
+        for name in player_names[:10]:
+            search = name.lower()
+            for p in players:
+                web_name = p.get("web_name", "").lower()
+                if search in web_name or web_name in search:
+                    selected.append(p)
+                    break
+        if not selected:
+            return f"Could not find any of those players: {', '.join(player_names)}"
+        # Named players get the accurate path: real per-GW history.
+        preds = await predict_for_players(selected, with_history=True)
+        header = "**Predicted points (next gameweek)**"
+    else:
+        pool = players
+        if position and position != "all":
+            wanted = POSITIONS_REV.get(position.upper())
+            if wanted:
+                pool = [p for p in pool if p.get("element_type") == wanted]
+        preds = ml_predict_v2.predict_points(pool)
+        selected = sorted(pool, key=lambda p: preds.get(p["id"], {}).get("predicted_points", 0),
+                          reverse=True)[:limit]
+        header = f"**Top {len(selected)} by predicted points (next gameweek)**"
+        if position and position != "all":
+            header += f" — {position.upper()}"
+
+    lines = [header, ""]
+    for p in selected:
+        r = preds.get(p["id"])
+        if not r:
+            continue
+        team_name = teams.get(p.get("team", 0), {}).get("short_name", "?")
+        lines.append(
+            f"  {p.get('web_name')} ({team_name}, £{p.get('now_cost',0)/10:.1f}m): "
+            f"**{r['predicted_points']} pts** — {int(r['play_probability']*100)}% likely to start, "
+            f"{r['points_if_plays']} pts if they do (confidence: {r['confidence']})"
+        )
+
+    if any(preds.get(p["id"], {}).get("basis") == "season_totals" for p in selected):
+        lines.append("")
+        lines.append("_Note: no gameweek history exists yet this season, so these are estimated from "
+                     "last season's per-game rates and cannot reflect current form — treat as rough._")
+
+    lines.append("")
+    lines.append("_This model ranks who's likely to do well; it deliberately under-predicts big hauls, "
+                 "so use it alongside fixtures and team news rather than on its own._")
     return "\n".join(lines)
 
 

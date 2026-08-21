@@ -30,11 +30,11 @@ ALLOWED_TOPICS = [
     "value", "stats", "statistics", "performance", "ownership",
     "selected by", "transfers in", "transfers out",
 
-    # Teams (Premier League)
+    # Teams (Premier League 2026/27)
     "arsenal", "aston villa", "bournemouth", "brentford", "brighton",
-    "chelsea", "crystal palace", "everton", "fulham", "ipswich",
-    "leicester", "liverpool", "manchester city", "manchester united", "man city", "man utd",
-    "newcastle", "nottingham forest", "southampton", "tottenham", "spurs",
+    "chelsea", "coventry", "crystal palace", "everton", "fulham", "hull",
+    "ipswich", "leeds", "liverpool", "manchester city", "manchester united", "man city", "man utd",
+    "newcastle", "nottingham forest", "sunderland", "tottenham", "spurs",
     "west ham", "wolves", "wolverhampton",
 
     # Project related

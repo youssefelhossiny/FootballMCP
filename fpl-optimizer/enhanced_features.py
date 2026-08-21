@@ -7,14 +7,22 @@ Phase 3: Understat integration (xG, xA, npxG, xGChain, xGBuildup)
 Phase 4: FBRef integration (tackles, interceptions, blocks, clearances, progressive passes, SCA/GCA)
 """
 
+import json
 from typing import Dict, List, Optional, Tuple
 from data_sources.understat_scraper import UnderstatScraper
-from data_sources.fbref_scraper import FBRefScraper
+from data_sources.fbref_scraper import FBRefScraper, CHAMPIONSHIP_LEAGUE
 from data_sources.data_cache import DataCache
-from player_mapping.name_matcher import PlayerNameMatcher
+from player_mapping.name_matcher import PlayerNameMatcher, TEAM_MAPPING
 from season_config import CURRENT_SEASON, PRIOR_SEASON, to_fbref, resolve_stats_season, display_label
 import asyncio
 from pathlib import Path
+
+
+# FPL team IDs promoted into the EPL for 2026/27 (no prior EPL Understat/FBRef
+# history — Championship data is the only available prior-season baseline).
+# Understat has no Championship coverage at all, so these players only ever
+# get an xG/xA baseline once they accrue real EPL minutes.
+PROMOTED_TEAM_IDS = {7, 11, 12}  # Coventry City, Hull City, Ipswich Town
 
 
 class EnhancedDataCollector:
@@ -90,6 +98,23 @@ class EnhancedDataCollector:
         print("📥 Fetching FBRef data...")
         players = self.fbref_scraper.fetch_player_stats(season=season, use_cache=use_cache)
         return players
+
+    def fetch_championship_fbref_data(self, season: str = None, use_cache: bool = True) -> List[Dict]:
+        """
+        Fetch prior-season Championship FBRef data — the baseline source for
+        promoted-team players (see PROMOTED_TEAM_IDS) who have no EPL history.
+
+        Args:
+            season: Season in format "2025-2026". Defaults to the prior season.
+            use_cache: Whether to use cached data if available
+
+        Returns:
+            List of FBRef player dicts (Championship), or [] if unavailable
+        """
+        if season is None:
+            season = to_fbref(PRIOR_SEASON)
+        print("📥 Fetching Championship FBRef data (promoted-team baseline)...")
+        return self.fbref_scraper.fetch_player_stats(season=season, use_cache=use_cache, league=CHAMPIONSHIP_LEAGUE)
 
     def merge_player_data(
         self,
@@ -388,20 +413,35 @@ class EnhancedDataCollector:
         """
         print("🚀 Starting enhanced data collection (Phase 4)...")
 
-        # Resolve which season's advanced stats to use (auto-detect w/ fallback)
+        # Resolve which season's advanced stats to use (auto-detect w/ fallback).
+        # Understat and FBRef are resolved INDEPENDENTLY — they don't publish
+        # on the same schedule (FBRef has been observed to have current-season
+        # data while Understat is still empty), so locking FBRef to whatever
+        # season Understat resolved to under-uses FBRef's freshest data.
         if season is None:
-            season, understat_players = resolve_stats_season(
+            understat_season, understat_players = resolve_stats_season(
                 self.fetch_understat_data, use_cache=use_cache
             )
         else:
+            understat_season = season
             understat_players = self.fetch_understat_data(season=season, use_cache=use_cache)
 
-        # Keep FBRef on the same season Understat resolved to
-        fbref_season = to_fbref(season) if len(season) == 4 else season
-        print(f"📊 Advanced stats season: {display_label(season)}")
+        def _fetch_fbref_for_year(year: str, use_cache: bool) -> List[Dict]:
+            return self.fetch_fbref_data(season=to_fbref(year), use_cache=use_cache)
 
-        # Fetch FBRef data
-        fbref_players = self.fetch_fbref_data(season=fbref_season, use_cache=use_cache)
+        if season is None:
+            fbref_season, fbref_players = resolve_stats_season(
+                _fetch_fbref_for_year, use_cache=use_cache
+            )
+        else:
+            fbref_season = season
+            fbref_players = _fetch_fbref_for_year(season, use_cache)
+
+        print(
+            f"📊 Advanced stats season — Understat: {display_label(understat_season)}, "
+            f"FBRef: {display_label(fbref_season)}"
+        )
+        season = understat_season  # kept for the return-value contract below
 
         if not understat_players:
             print("⚠️  No Understat data available")
@@ -415,28 +455,62 @@ class EnhancedDataCollector:
 
         # Match Understat players
         matched_understat = {}
+        understat_unmatched = []
+        understat_stats = {'matched': 0, 'total': len(fpl_players), 'match_rate': 0.0}
         if understat_players:
             print(f"🔗 Matching {len(fpl_players)} FPL players to {len(understat_players)} Understat players...")
             self.matcher.clear_log()
-            matched_understat, unmatched = self.matcher.match_all_players(
+            matched_understat, understat_unmatched = self.matcher.match_all_players(
                 fpl_players,
                 understat_players,
                 threshold=match_threshold
             )
+            understat_stats = self.matcher.get_match_stats()
 
         # Match FBRef players using same fuzzy matching logic
         matched_fbref = {}
+        fbref_unmatched = []
         if fbref_players:
             print(f"🔗 Matching {len(fpl_players)} FPL players to {len(fbref_players)} FBRef players...")
             self.matcher.clear_log()
-            matched_fbref, _ = self.matcher.match_all_players(
+            matched_fbref, fbref_unmatched = self.matcher.match_all_players(
                 fpl_players,
                 fbref_players,
                 threshold=match_threshold
             )
 
-        # Get match statistics
-        stats = self.matcher.get_match_stats() if understat_players else {'matched': 0, 'total': len(fpl_players), 'match_rate': 0.0}
+            # Promoted teams (Coventry/Hull/Ipswich) have zero EPL FBRef
+            # history — retry their unmatched players against prior-season
+            # Championship data instead, so they still get a defensive/
+            # progressive-stats baseline rather than showing as invisible.
+            promoted_unmatched = [
+                p for p in fbref_unmatched if p.get('team') in PROMOTED_TEAM_IDS
+            ]
+            if promoted_unmatched:
+                championship_players = self.fetch_championship_fbref_data(use_cache=use_cache)
+                if championship_players:
+                    print(
+                        f"🔗 Retrying {len(promoted_unmatched)} promoted-team players against "
+                        f"{len(championship_players)} Championship FBRef players..."
+                    )
+                    self.matcher.clear_log()
+                    matched_championship, still_unmatched = self.matcher.match_all_players(
+                        promoted_unmatched,
+                        championship_players,
+                        threshold=match_threshold
+                    )
+                    matched_fbref.update(matched_championship)
+                    still_unmatched_ids = {p['id'] for p in still_unmatched}
+                    fbref_unmatched = [
+                        p for p in fbref_unmatched
+                        if p.get('team') not in PROMOTED_TEAM_IDS or p['id'] in still_unmatched_ids
+                    ]
+
+        # Use Understat's stats as the headline match rate (kept for
+        # backwards compatibility with callers reading stats['match_rate']),
+        # but track both sources' unmatched lists explicitly rather than via
+        # the matcher's shared mutable log (which gets overwritten above).
+        stats = understat_stats
 
         # Show which players were matched
         if stats.get('methods'):
@@ -464,14 +538,58 @@ class EnhancedDataCollector:
         print(f"   Understat: {stats['matched']}/{stats['total']} ({stats['match_rate']}%)")
         print(f"   FBRef: {fbref_matched}/{len(fpl_players)} ({stats['fbref_match_rate']}%)")
 
-        if stats.get('unmatched', 0) > 0:
-            print(f"\n⚠️  Unmatched players ({stats['unmatched']}):")
-            for name in self.matcher.get_unmatched_players()[:10]:
-                print(f"   - {name}")
-            if stats['unmatched'] > 10:
-                print(f"   ... and {stats['unmatched'] - 10} more")
+        if understat_unmatched:
+            print(f"\n⚠️  Understat-unmatched players ({len(understat_unmatched)}):")
+            for p in understat_unmatched[:10]:
+                print(f"   - {p.get('first_name', '')} {p.get('second_name', '')}")
+            if len(understat_unmatched) > 10:
+                print(f"   ... and {len(understat_unmatched) - 10} more")
+
+        self._write_unmatched_report(understat_unmatched, fbref_unmatched, stats, season)
 
         return enhanced_players, stats
+
+    def _write_unmatched_report(
+        self,
+        understat_unmatched: List[Dict],
+        fbref_unmatched: List[Dict],
+        stats: Dict,
+        season: str
+    ):
+        """
+        Persist the list of FPL players that couldn't be matched to Understat
+        and/or FBRef, so match-rate gaps are visible without re-running the
+        pipeline with console output captured (previously console-print only).
+
+        Written to cache/unmatched_players.json, overwritten on every run.
+        """
+        def _describe(p: Dict) -> Dict:
+            return {
+                'id': p.get('id'),
+                'name': f"{p.get('first_name', '')} {p.get('second_name', '')}".strip(),
+                'web_name': p.get('web_name', ''),
+                'team': p.get('team'),
+                'is_promoted_team': p.get('team') in PROMOTED_TEAM_IDS,
+            }
+
+        report = {
+            'season': season,
+            'total_fpl_players': stats.get('total', 0),
+            'understat_match_rate': stats.get('match_rate', 0.0),
+            'fbref_match_rate': stats.get('fbref_match_rate', 0.0),
+            'understat_unmatched_count': len(understat_unmatched),
+            'fbref_unmatched_count': len(fbref_unmatched),
+            'understat_unmatched': [_describe(p) for p in understat_unmatched],
+            'fbref_unmatched': [_describe(p) for p in fbref_unmatched],
+        }
+
+        try:
+            self.cache.cache_dir.mkdir(parents=True, exist_ok=True)
+            report_path = self.cache.cache_dir / "unmatched_players.json"
+            with open(report_path, 'w') as f:
+                json.dump(report, f, indent=2)
+        except Exception as e:
+            print(f"⚠️  Failed to write unmatched-players report: {e}")
 
     def get_enhanced_player(
         self,
@@ -497,16 +615,21 @@ class EnhancedDataCollector:
             return None
 
         # Resolve season (auto-detect w/ fallback) and get Understat data
-        if season is None:
+        auto_detect = season is None
+        if auto_detect:
             season, understat_players = resolve_stats_season(self.fetch_understat_data)
         else:
             understat_players = self.fetch_understat_data(season=season)
 
-        # Convert season format for FBRef
-        fbref_season = to_fbref(season) if len(season) == 4 else season
-
-        # Get FBRef data
-        fbref_players = self.fetch_fbref_data(season=fbref_season)
+        # Resolve FBRef's season independently — it doesn't publish on the
+        # same schedule as Understat (see collect_enhanced_data for detail).
+        if auto_detect:
+            _, fbref_players = resolve_stats_season(
+                lambda year, use_cache: self.fetch_fbref_data(season=to_fbref(year), use_cache=use_cache)
+            )
+        else:
+            fbref_season = to_fbref(season) if len(season) == 4 else season
+            fbref_players = self.fetch_fbref_data(season=fbref_season)
 
         # Match Understat
         understat_match = None

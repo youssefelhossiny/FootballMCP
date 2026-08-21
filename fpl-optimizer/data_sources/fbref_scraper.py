@@ -6,17 +6,236 @@ Key stats for FPL:
 - Defensive: Tackles, Interceptions, Blocks, Clearances (for FPL defensive contribution points)
 - Progressive: Progressive passes, carries, receptions (for midfielder value)
 - Creation: SCA, GCA (shot/goal creating actions)
+
+Also supports the EFL Championship as a prior-season baseline source for
+promoted teams (soccerdata's built-in league list only covers the "big 5" +
+internationals, so the Championship is registered via a custom league_dict.json
+in soccerdata's config dir — see `_ensure_championship_league_registered`).
 """
 
-import soccerdata as sd
+import json
+import os
 import time
+from pathlib import Path
+
 import pandas as pd
 from typing import Dict, List, Optional
-from pathlib import Path
+
 try:
     from data_cache import DataCache
 except ImportError:
     from data_sources.data_cache import DataCache
+
+
+CHAMPIONSHIP_LEAGUE = "ENG-Championship"
+
+
+def _ensure_championship_league_registered():
+    """
+    Register the EFL Championship with soccerdata so it can be passed as a
+    `leagues=` value to `sd.FBref`. soccerdata only ships the "big 5" European
+    leagues + internationals out of the box; anything else must be added via
+    a user config file at `<soccerdata base dir>/config/league_dict.json`,
+    which soccerdata merges into its LEAGUE_DICT **at import time** — so this
+    must run before `import soccerdata`. Idempotent and self-healing so it
+    works in fresh environments (e.g. Render) without manual setup.
+    """
+    base_dir = Path(os.environ.get("SOCCERDATA_DIR", Path.home() / "soccerdata"))
+    config_dir = base_dir / "config"
+    config_path = config_dir / "league_dict.json"
+
+    existing = {}
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    if CHAMPIONSHIP_LEAGUE in existing:
+        return
+
+    existing[CHAMPIONSHIP_LEAGUE] = {
+        "FBref": "EFL Championship",
+        "season_start": "Aug",
+        "season_end": "May",
+    }
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    with open(config_path, 'w') as f:
+        json.dump(existing, f, indent=2)
+
+
+# Must run before `import soccerdata` — soccerdata builds its LEAGUE_DICT
+# (merging in this config file) as a module-level side effect at import time.
+_ensure_championship_league_registered()
+
+import soccerdata as sd  # noqa: E402
+from lxml import html as lxml_html, etree
+from soccerdata.fbref import _parse_table, _fix_nation_col, _concat
+from soccerdata._common import standardize_colnames
+
+
+# soccerdata's read_player_season_stats() only whitelists a handful of
+# stat_type values ('standard', 'keeper', 'shooting', 'playing_time', 'misc')
+# — 'defense', 'passing', 'possession' and 'goal_shot_creation' were dropped
+# from the library's supported list even though FBRef still serves these
+# pages/tables at the same URLs. This replicates that method's internal
+# fetch+parse chain (single-league branch) for the unsupported stat types,
+# so tackles/interceptions/blocks/progressive-passing/SCA/GCA keep working.
+EXTENDED_STAT_TYPES = {"defense", "passing", "possession", "goal_shot_creation"}
+
+# Which output columns of _process_stats come from which upstream stat-type
+# page. Used to report exactly which fields are zero-filled (not real) when a
+# stat-type fetch fails, so a hollow cache can't be mistaken for real data.
+# Note: def_contributions{,_per_90} is derived as tackles+interceptions+
+# blocks+clearances, so it is corrupted if EITHER defense or passing fails.
+_STAT_TYPE_COLUMNS = {
+    "defense": (
+        "tackles", "tackles_won", "tackle_pct", "interceptions",
+        "tackles_plus_int", "blocks", "clearances", "errors",
+        "def_contributions", "def_contributions_per_90",
+    ),
+    "passing": (
+        "progressive_passes", "progressive_passes_per_90",
+        "def_contributions", "def_contributions_per_90",
+    ),
+    "possession": (
+        "progressive_carries", "progressive_receptions",
+        "progressive_carries_per_90", "progressive_receptions_per_90",
+        "touches", "touches_att_3rd",
+    ),
+    "goal_shot_creation": ("sca", "gca", "sca_per_90", "gca_per_90"),
+    "misc": ("recoveries", "recoveries_per_90"),
+}
+
+
+def _wait_for_table_html(driver, url: str, marker: str, timeout: float = 40.0, poll: float = 2.0) -> str:
+    """
+    Navigate to `url` and poll the live page source until `marker` (e.g. the
+    'div_stats_standard' comment id) actually appears, instead of trusting
+    soccerdata's fixed 7s post-navigation sleep (`BaseSeleniumReader.
+    _download_and_save`), which grabs `page_source` unconditionally after a
+    flat delay and happily accepts FBRef's consent-banner/Cloudflare
+    interstitial as "the page" if that overlay hasn't cleared yet in time.
+
+    The interstitial is a cosmetic layer, not a replacement page — the real
+    table sits in the DOM underneath it and typically appears within a few
+    extra seconds. Polling for the actual marker (rather than a fixed sleep)
+    is what makes that timing difference survivable.
+    """
+    driver.get(url)
+    deadline = time.time() + timeout
+    last_source = ""
+    while time.time() < deadline:
+        last_source = driver.page_source
+        if marker in last_source:
+            return last_source
+        time.sleep(poll)
+    return last_source
+
+
+def _fetch_extended_player_stats(
+    fbref_client, stat_type: str, max_attempts: int = 3, seasons: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    """
+    Fetch a player-season-stats page FBRef still serves but soccerdata's
+    read_player_season_stats() no longer whitelists. Mirrors that method's
+    processing chain exactly (see soccerdata/fbref.py) for the single-league
+    (non "Big 5 Combined") case, which is all this project ever selects,
+    including soccerdata's own `_concat` (which moves the "Unnamed: ..."
+    Player/Squad/league/season labels from level 1 to level 0 — required
+    for set_index(["league","season","team","player"]) to resolve at all).
+
+    FBRef intermittently serves a consent-banner interstitial instead of the
+    real page even after soccerdata's internal retry; retried here since it
+    self-resolves in practice (observed 3/4 stat types succeed first try).
+    Retries drive the underlying Selenium session directly (`_wait_for_table_
+    html`) to poll for the real table rather than re-triggering the same
+    fixed-sleep race soccerdata's own `get()` would hit again.
+
+    Args:
+        seasons: pre-fetched fbref_client.read_seasons() result, so callers
+            fetching multiple stat types don't repeat that (uncached) live
+            page load once per stat type.
+    """
+    if seasons is None:
+        seasons = fbref_client.read_seasons()
+
+    # FBRef's URL path segment doesn't always match the stat_type name
+    # (mirrors soccerdata.fbref.read_player_season_stats's own mapping).
+    page = {"standard": "stats", "keeper": "keepers", "playing_time": "playingtime"}.get(
+        stat_type, stat_type
+    )
+
+    frames = []
+    for (lkey, skey), season in seasons.iterrows():
+        filepath = fbref_client.data_dir / f"players_{lkey}_{skey}_{stat_type}.html"
+        url = (
+            "https://fbref.com"
+            + "/".join(season.url.split("/")[:-1])
+            + f"/{page}/"
+            + season.url.split("/")[-1]
+        )
+        marker = f"div_stats_{stat_type}"
+
+        html_table = None
+        last_error = None
+        for attempt in range(max_attempts):
+            if attempt == 0:
+                if filepath.exists():
+                    filepath.unlink()
+                reader = fbref_client.get(url, filepath)
+                tree = lxml_html.parse(reader)
+            else:
+                # A plain retry through fbref_client.get() would hit the same
+                # fixed-sleep race that failed last time — poll the real
+                # driver instead so a slow-clearing interstitial has a chance
+                # to resolve before we give up.
+                page_source = _wait_for_table_html(fbref_client._driver, url, marker)
+                if not fbref_client.no_store:
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+                    filepath.write_text(page_source, encoding="utf-8")
+                if os.environ.get("FBREF_DEBUG_DUMP"):
+                    debug_path = Path(f"/tmp/fbref_debug_{stat_type}_attempt{attempt}.html")
+                    debug_path.write_text(page_source, encoding="utf-8")
+                    print(f"   [debug] dumped {len(page_source)} bytes to {debug_path}, marker present: {marker in page_source}")
+                tree = lxml_html.fromstring(page_source)
+            for elem in tree.xpath("//td[@data-stat='comp_level']//span"):
+                elem.getparent().remove(elem)
+            try:
+                (el,) = tree.xpath(f"//comment()[contains(.,'{marker}')]")
+                parser = etree.HTMLParser(recover=True)
+                (html_table,) = etree.fromstring(el.text, parser).xpath(
+                    f"//table[contains(@id, 'stats_{stat_type}')]"
+                )
+                break
+            except ValueError as e:
+                last_error = e
+                html_table = None
+
+        if html_table is None:
+            raise RuntimeError(
+                f"Could not load FBRef '{stat_type}' table after {max_attempts} attempts "
+                f"(likely a consent-banner/anti-bot interstitial): {last_error}"
+            )
+
+        df_table = _parse_table(html_table)
+        df_table[("Unnamed: league", "league")] = lkey
+        df_table[("Unnamed: season", "season")] = skey
+        df_table = _fix_nation_col(df_table)
+        frames.append(df_table)
+
+    df = _concat(frames, key=["league", "season"])
+    df = df[df.Player != "Player"]
+    return (
+        df.drop("Matches", axis=1, level=0)
+        .drop("Rk", axis=1, level=0)
+        .rename(columns={"Squad": "team"})
+        .pipe(standardize_colnames, cols=["Player", "Nation", "Pos", "Age", "Born"])
+        .set_index(["league", "season", "team", "player"])
+        .sort_index()
+    )
 
 
 class FBRefScraper:
@@ -30,6 +249,8 @@ class FBRefScraper:
             cache_dir: Directory for caching (default: same as understat cache)
         """
         self.fbref = None
+        self._fbref_league = None
+        self._fbref_season = None
         self.last_request_time = 0
         self.rate_limit_delay = 6.0  # FBRef requires 6 seconds between requests
 
@@ -50,24 +271,34 @@ class FBRefScraper:
 
         self.last_request_time = time.time()
 
-    def _get_fbref_client(self, season: str = "2026-2027"):
-        """Get or create FBRef client"""
-        if self.fbref is None:
-            self.fbref = sd.FBref(leagues="ENG-Premier League", seasons=season)
+    def _get_fbref_client(self, season: str = "2026-2027", league: str = "ENG-Premier League"):
+        """Get or create FBRef client for the given league/season (rebuilds on change)"""
+        if self.fbref is None or self._fbref_league != league or self._fbref_season != season:
+            self.fbref = sd.FBref(leagues=league, seasons=season)
+            self._fbref_league = league
+            self._fbref_season = season
         return self.fbref
 
-    def fetch_player_stats(self, season: str = "2026-2027", use_cache: bool = True) -> List[Dict]:
+    def fetch_player_stats(
+        self,
+        season: str = "2026-2027",
+        use_cache: bool = True,
+        league: str = "ENG-Premier League",
+    ) -> List[Dict]:
         """
         Fetch all player stats from FBRef (defensive, passing, possession)
 
         Args:
             season: Season in format "2024-2025"
             use_cache: Whether to use cached data if available
+            league: soccerdata canonical league id, e.g. "ENG-Premier League"
+                or "ENG-Championship" (see CHAMPIONSHIP_LEAGUE)
 
         Returns:
             List of player dictionaries with FBRef stats
         """
-        cache_key = f"fbref_epl_{season.replace('-', '_')}"
+        league_slug = league.replace(" ", "_").replace("-", "_").lower()
+        cache_key = f"fbref_{league_slug}_{season.replace('-', '_')}"
 
         # Check cache first
         if use_cache:
@@ -76,38 +307,84 @@ class FBRefScraper:
                 return cached_data
 
         try:
-            print(f"Fetching FBRef data for EPL {season}...")
-            fbref = self._get_fbref_client(season)
+            print(f"Fetching FBRef data for {league} {season}...")
+            fbref = self._get_fbref_client(season, league=league)
 
-            # Fetch different stat types
-            print("   Fetching defensive stats...")
-            self._rate_limit()
-            defense_df = fbref.read_player_season_stats(stat_type="defense")
+            # Fetch different stat types. defense/passing/possession/
+            # goal_shot_creation are no longer in soccerdata's
+            # read_player_season_stats() whitelist (dropped from the library,
+            # though FBRef still serves these pages) — fetched via
+            # _fetch_extended_player_stats, which replicates that method's
+            # internal fetch+parse chain for the still-working URLs. Each is
+            # fault-tolerant: FBRef intermittently serves a consent-banner
+            # interstitial that won't clear even after retries, and losing
+            # one stat type shouldn't fail the whole collection pass.
+            extended_seasons = fbref.read_seasons()
 
-            print("   Fetching passing stats...")
-            self._rate_limit()
-            passing_df = fbref.read_player_season_stats(stat_type="passing")
+            # Track which stat types actually failed. Without this, a failed
+            # fetch degrades to an empty DataFrame, _process_stats fills the
+            # affected columns with 0, and the result gets cached as if it
+            # were real data — indistinguishable from "genuinely zero".
+            # That silently poisoned the 2025/26 cache (0/551 rows nonzero
+            # for tackles/blocks/clearances/progressive/sca/gca) and in turn
+            # fed 22 constant features into the ML backtest.
+            failed_stat_types: List[str] = []
 
-            print("   Fetching possession stats...")
-            self._rate_limit()
-            possession_df = fbref.read_player_season_stats(stat_type="possession")
+            def _fetch_or_empty(label: str, stat_type: str) -> pd.DataFrame:
+                print(f"   Fetching {label} stats...")
+                self._rate_limit()
+                try:
+                    return _fetch_extended_player_stats(
+                        fbref, stat_type, max_attempts=2, seasons=extended_seasons
+                    )
+                except RuntimeError as e:
+                    print(f"   ⚠️  Could not load {label} stats, continuing without: {e}")
+                    failed_stat_types.append(stat_type)
+                    return pd.DataFrame()
 
-            print("   Fetching goal/shot creation stats...")
-            self._rate_limit()
-            gca_df = fbref.read_player_season_stats(stat_type="goal_shot_creation")
+            defense_df = _fetch_or_empty("defensive", "defense")
+            passing_df = _fetch_or_empty("passing", "passing")
+            possession_df = _fetch_or_empty("possession", "possession")
+            gca_df = _fetch_or_empty("goal/shot creation", "goal_shot_creation")
 
+            # standard/misc anchor _process_stats below (unlike the four
+            # optional stat types above, an empty result here means an empty
+            # player list) — worth the extra polling-retry attempts rather
+            # than degrading silently.
             print("   Fetching standard stats...")
             self._rate_limit()
-            standard_df = fbref.read_player_season_stats(stat_type="standard")
+            standard_df = _fetch_extended_player_stats(
+                fbref, "standard", max_attempts=3, seasons=extended_seasons
+            )
 
             print("   Fetching miscellaneous stats (recoveries)...")
             self._rate_limit()
-            misc_df = fbref.read_player_season_stats(stat_type="misc")
+            misc_df = _fetch_extended_player_stats(
+                fbref, "misc", max_attempts=3, seasons=extended_seasons
+            )
 
             # Process and merge data
             processed = self._process_stats(
                 defense_df, passing_df, possession_df, gca_df, standard_df, misc_df
             )
+
+            # Stamp provenance so a partially-failed fetch is detectable
+            # downstream instead of looking like real all-zero data. Any
+            # consumer that cares (e.g. ML training) can check
+            # `_incomplete_stat_types` and refuse to trust those columns.
+            if failed_stat_types:
+                affected = sorted(
+                    col
+                    for st in failed_stat_types
+                    for col in _STAT_TYPE_COLUMNS.get(st, ())
+                )
+                print(
+                    f"   ⚠️  INCOMPLETE FBRef data — {len(failed_stat_types)} stat "
+                    f"type(s) failed ({', '.join(failed_stat_types)}); the "
+                    f"following columns are zero-filled, NOT real: {', '.join(affected)}"
+                )
+                for player in processed:
+                    player["_incomplete_stat_types"] = failed_stat_types
 
             # Cache the results
             if processed:
@@ -130,6 +407,21 @@ class FBRefScraper:
                 return stale_data
 
             return []
+
+    def fetch_championship_stats(self, season: str = "2025-2026", use_cache: bool = True) -> List[Dict]:
+        """
+        Fetch Championship (2nd tier) player stats — used as a prior-season
+        baseline for teams promoted into the EPL who have no EPL-level FBRef
+        history yet (e.g. Coventry, Hull, Ipswich for 2026/27).
+
+        Args:
+            season: Season in format "2025-2026"
+            use_cache: Whether to use cached data if available
+
+        Returns:
+            List of player dictionaries with FBRef stats
+        """
+        return self.fetch_player_stats(season=season, use_cache=use_cache, league=CHAMPIONSHIP_LEAGUE)
 
     def _process_stats(
         self,

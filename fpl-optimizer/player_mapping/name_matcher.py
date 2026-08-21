@@ -87,7 +87,14 @@ class PlayerNameMatcher:
         """
         try:
             with open(path, 'r') as f:
-                self.manual_mappings = json.load(f)
+                raw_mappings = json.load(f)
+            # Strip whitespace on load — a stray trailing/leading space in
+            # either the FPL-side key or the external-source value silently
+            # breaks the lookup (fpl_full_name is always .strip()ped before
+            # comparison, so an un-stripped key never matches).
+            self.manual_mappings = {
+                k.strip(): v.strip() for k, v in raw_mappings.items()
+            }
             # Note: Removed print() - it corrupts MCP stdout JSON protocol
         except FileNotFoundError:
             pass  # Silent - no mappings file is OK
@@ -153,22 +160,57 @@ class PlayerNameMatcher:
                 # Fallback to all players if team filtering yields no results
                 candidates = external_players
 
+        result, score, method = self._match_within(fpl_full_name, web_name, candidates, threshold)
+        if result:
+            self._log_match(fpl_full_name, result['name'], score, method)
+            return result
+
+        # A summer transfer means the player's team-filtered pool won't
+        # contain them at all (their external-source row is still tagged
+        # with last season's club) — retry against the FULL unfiltered
+        # pool, but only accept a near-exact match (high threshold) since
+        # there's no team anchor to rule out same-surname false positives.
+        if candidates is not external_players:
+            result, score, _ = self._match_within(
+                fpl_full_name, web_name, external_players, max(threshold, 95)
+            )
+            if result:
+                self._log_match(fpl_full_name, result['name'], score, 'cross_team_transfer')
+                return result
+
+        # No match found
+        self._log_match(fpl_full_name, None, 0, 'no_match')
+        return None
+
+    def _match_within(
+        self,
+        fpl_full_name: str,
+        web_name: str,
+        candidates: List[Dict],
+        threshold: int
+    ) -> Tuple[Optional[Dict], int, str]:
+        """Run the exact -> normalized -> fuzzy cascade against a candidate pool.
+
+        Returns (matched_player_or_None, score, method) — does not log; the
+        caller logs once, since a match found here may get re-labeled (e.g.
+        'cross_team_transfer') by the caller's retry logic.
+        """
         # Try exact match first (case-insensitive)
         for candidate in candidates:
             if candidate['name'].lower() == fpl_full_name.lower():
-                self._log_match(fpl_full_name, candidate['name'], 100, 'exact')
-                return candidate
+                return candidate, 100, 'exact'
 
         # Try normalized exact match (accent-insensitive)
         fpl_normalized = normalize_name(fpl_full_name)
         for candidate in candidates:
             candidate_normalized = normalize_name(candidate['name'])
             if candidate_normalized == fpl_normalized:
-                self._log_match(fpl_full_name, candidate['name'], 100, 'exact_normalized')
-                return candidate
+                return candidate, 100, 'exact_normalized'
+
+        if not candidates:
+            return None, 0, ''
 
         # Fuzzy matching with normalized names
-        candidate_names = [p['name'] for p in candidates]
         candidate_names_normalized = [normalize_name(p['name']) for p in candidates]
 
         # Try full name match (normalized)
@@ -181,9 +223,7 @@ class PlayerNameMatcher:
         if match and match[1] >= threshold:
             # Find the matching player by index (match[0] is the normalized name)
             matched_idx = candidate_names_normalized.index(match[0])
-            matched_candidate = candidates[matched_idx]
-            self._log_match(fpl_full_name, matched_candidate['name'], match[1], 'fuzzy_full_normalized')
-            return matched_candidate
+            return candidates[matched_idx], match[1], 'fuzzy_full_normalized'
 
         # Try web_name match (e.g., "Salah" instead of "Mohamed Salah")
         if web_name:
@@ -196,13 +236,9 @@ class PlayerNameMatcher:
 
             if match and match[1] >= threshold:
                 matched_idx = candidate_names_normalized.index(match[0])
-                matched_candidate = candidates[matched_idx]
-                self._log_match(fpl_full_name, matched_candidate['name'], match[1], 'fuzzy_web_normalized')
-                return matched_candidate
+                return candidates[matched_idx], match[1], 'fuzzy_web_normalized'
 
-        # No match found
-        self._log_match(fpl_full_name, None, 0, 'no_match')
-        return None
+        return None, 0, ''
 
     def match_all_players(
         self,
