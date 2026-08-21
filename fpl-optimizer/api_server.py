@@ -46,6 +46,7 @@ from data_sources.team_news_scraper import fetch_knocks_and_bans, fetch_ffscout_
 from data_sources.data_cache import DataCache
 import ml_predict_v2
 import fpl_auth
+import player_news_search
 from enhanced_optimization import EnhancedOptimizer, FixtureAnalyzer
 from chips_strategy import ChipsStrategyAnalyzer
 
@@ -81,15 +82,23 @@ availability_filter = AvailabilityFilter()
 fixture_analyzer = FixtureAnalyzer()
 enhanced_optimizer = EnhancedOptimizer()
 
-# Minimum FPL chance-of-playing to be SELECTED into a squad. Players FPL marks
-# injured / suspended / unavailable are already excluded regardless.
+# Two different bars, because buying a player and starting one you already own
+# are different decisions with different downside.
 #
-# Set to 50 deliberately: FPL auto-substitutes, so owning a strong player on a
-# temporary doubt costs nothing (start him — points if he plays, auto-sub if
-# not), while a sub-50% flag usually means a real absence not worth a squad slot.
-# The model's predicted_points already discounts by play probability, so a
-# doubtful player is naturally ranked lower without being banned outright.
+# BUYING is stricter than starting — a squad slot is committed and can't be
+# undone without a transfer hit. 50 keeps a genuinely useful band in play:
+# FPL's flags are coarse (0/25/50/75/100), and a 50% flag on a strong player is
+# often a knock that clears by kickoff, whereas 25% and below usually means a
+# real absence. Combined with the model discounting by play probability, a 50%
+# player has to be clearly better than the alternatives to actually get picked.
 SQUAD_MIN_CHANCE = int(os.getenv("SQUAD_MIN_CHANCE", "50"))
+
+# STARTING is permissive. Once a player is in the squad the transfer cost is
+# already sunk, so the only question is bench-or-start — and any chance of
+# playing beats a guaranteed zero, because FPL auto-substitutes if he doesn't
+# appear. So a player who'd never be bought at 50% is still worth starting at
+# 50% if he's already owned. Anything above zero qualifies.
+START_MIN_CHANCE = int(os.getenv("START_MIN_CHANCE", "1"))
 chips_analyzer = ChipsStrategyAnalyzer()
 # Short TTL: these sources claim near-real-time updates, so a stale multi-hour
 # cache (like the 6h default) would defeat the point of using them over FPL's
@@ -409,6 +418,24 @@ FPL_TOOLS = [
                     }
                 },
                 "required": ["available_chips"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_player_news",
+            "description": "Search the live web for the latest injury/availability news on specific players, and cross-reference it against FPL's own flag, Knocks and Bans, and Fantasy Football Scout. Use this whenever a player shows a PARTIAL doubt (25/50/75%) or the structured sources disagree — those flags are coarse and hand-updated, so they go stale. Real example: FPL listed a player at 75% while FFScout said 25% and the press had a third answer. Slower than the other tools (it runs real web searches), so use it for a handful of players you're actually deciding on, not for browsing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "player_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Players to check, e.g. ['Doku','Bruno G.']. Max 6."
+                    }
+                },
+                "required": ["player_names"]
             }
         }
     },
@@ -987,22 +1014,24 @@ async def build_optimal_squad(strategy: str, budget: float, num_gws: int) -> Dic
     # (not rotation-risk, predicted points) and fill a legal formation.
     def start_rank(player: Dict) -> tuple:
         """
-        Rank by expected value only — deliberately NOT penalising rotation risk.
+        Rank by expected value, with one hard gate.
 
-        FPL auto-substitutes: if a starter doesn't play, a bench player replaces
-        them. So starting a doubtful player is strictly better than benching
-        him — start him and you get his points if he plays and an auto-sub if he
-        doesn't; bench him and you cannot get his points at all. Demoting a
-        rotation risk out of the XI throws away upside for no protection.
+        A player with a genuine ZERO chance of playing sorts last: he is not a
+        gamble, he is a certainty of nothing, and starting him wastes a slot an
+        auto-sub could have filled. Anything above zero ranks normally — FPL
+        auto-substitutes, so a doubtful player in the XI risks nothing (points
+        if he plays, auto-sub if not) while benching him forfeits his points
+        outright. That's why rotation risk does NOT demote a player here, even
+        though it does affect captaincy.
+
         `predicted_points` already embeds play probability (the model multiplies
-        P(plays) by points-if-plays), so it is the right single ranking key.
-
-        Rotation risk instead matters for BENCH ORDER — see ordered_bench —
-        where a likely-to-play substitute should be first in line.
+        P(plays) by points-if-plays), so it is the right primary key.
         """
+        chance = player.get("chance_of_playing_next_round")
+        playable = 1 if (chance is None or chance >= START_MIN_CHANCE) else 0
         pred = preds.get(player["id"], {}).get("predicted_points", 0)
         prob = preds.get(player["id"], {}).get("play_probability") or 0
-        return (pred, prob)
+        return (playable, pred, prob)
 
     by_position: Dict[int, List[Dict]] = {1: [], 2: [], 3: [], 4: []}
     for player in squad:
@@ -2617,6 +2646,11 @@ async def execute_tool(tool_name: str, args: Dict, players: List[Dict], teams: D
             team_filter = args.get("team")
             return await tool_get_team_news(team_filter)
 
+        # === search_player_news - live web cross-reference ===
+        elif tool_name == "search_player_news":
+            names = args.get("player_names") or []
+            return await tool_search_player_news(names, players, teams)
+
         # === get_ml_prediction - v2 model predicted points ===
         elif tool_name == "get_ml_prediction":
             names = args.get("player_names") or []
@@ -2790,6 +2824,56 @@ def tool_get_injury_report(players: List[Dict], teams: Dict, team_filter: Option
     if not any_concerns:
         lines.append("\nNo injury/suspension/doubt concerns found" + (f" for {team_filter}" if team_filter else "") + ".")
 
+    return "\n".join(lines)
+
+
+async def tool_search_player_news(player_names: List[str], players: List[Dict], teams: Dict) -> str:
+    """Live web search for player news, cross-referenced against all three feeds."""
+    if not player_names:
+        return "Give me at least one player name to check."
+    if not player_news_search.available():
+        return ("Live news search isn't configured on this deployment. "
+                "get_team_news and get_injury_report still work.")
+
+    selected = []
+    for wanted in player_names[:6]:
+        needle = wanted.strip().lower()
+        for p in players:
+            web = (p.get("web_name") or "").lower()
+            if needle == web or needle in web or web in needle:
+                selected.append(p)
+                break
+    if not selected:
+        return f"Couldn't find any of those players: {', '.join(player_names)}"
+
+    candidates = [{
+        "name": f"{p.get('first_name','')} {p.get('second_name','')}".strip() or p.get("web_name"),
+        "web_name": p.get("web_name"),
+        "team": teams.get(p.get("team", 0), {}).get("short_name", ""),
+        "chance_of_playing": p.get("chance_of_playing_next_round"),
+        "news": p.get("news", ""),
+        "id": p.get("id"),
+    } for p in selected]
+
+    # Feed the scrapers in so the model arbitrates between all three sources
+    # rather than only against FPL — that comparison is the point of the tool.
+    try:
+        candidates = player_news_search.annotate_with_scrapers(candidates, await fetch_team_news())
+    except Exception as e:
+        print(f"⚠️  Could not attach scraper data to news search: {e}")
+
+    result = await asyncio.to_thread(player_news_search.search_player_news, candidates)
+
+    lines = ["**Live player news (web + all structured sources)**", ""]
+    for c in candidates:
+        lines.append(
+            f"  {c['name']} ({c['team']}) — FPL: "
+            f"{str(c['chance_of_playing']) + '%' if c['chance_of_playing'] is not None else 'no doubt'}"
+            f" | Knocks and Bans: {c.get('knocks_and_bans', 'not listed')}"
+            f" | FFScout: {c.get('ffscout', 'not listed')}"
+        )
+    lines.append("")
+    lines.append(result.get("report", "No report."))
     return "\n".join(lines)
 
 
