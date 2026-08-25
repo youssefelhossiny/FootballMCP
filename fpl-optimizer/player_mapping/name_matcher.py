@@ -92,9 +92,13 @@ class PlayerNameMatcher:
             # either the FPL-side key or the external-source value silently
             # breaks the lookup (fpl_full_name is always .strip()ped before
             # comparison, so an un-stripped key never matches).
-            self.manual_mappings = {
+            # MERGE rather than replace, so a caller can layer source-specific
+            # overrides on top of the shared file (FBRef and Understat spell
+            # some players differently, and one shared mapping cannot hold two
+            # targets for the same FPL name). Later loads win on conflict.
+            self.manual_mappings.update({
                 k.strip(): v.strip() for k, v in raw_mappings.items()
-            }
+            })
             # Note: Removed print() - it corrupts MCP stdout JSON protocol
         except FileNotFoundError:
             pass  # Silent - no mappings file is OK

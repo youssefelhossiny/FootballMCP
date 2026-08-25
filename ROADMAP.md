@@ -1060,6 +1060,35 @@ Both Task 7 predictions are confirmed:
    correctly distinguishing "not published" from "Cloudflare blocked us". Under the old message this
    would have been misfiled as an anti-bot block again.
 
+### Name matching re-audited on live 2026/27 data — 100% of players who have PLAYED (2026-08-25)
+The headline match rate LOOKS like a regression (Understat 68.6% → 50.98%) but that is a **denominator
+artifact, not a fault**: Understat and FBRef only carry rows for players who have actually appeared.
+After one gameweek exactly **310 of 612** FPL players have any minutes, and Understat publishes exactly
+310 rows — so ~50.7% is the arithmetic CEILING, not a shortfall. Judge coverage by
+players-with-minutes, never by the raw rate; the raw number will climb on its own as the season runs.
+
+Measured against the meaningful denominator, six real gaps existed and all six are now fixed:
+- **Understat (2):** `António João Pereira de Albuquerque Tavares da Silva` → `António Silva` (a
+  six-token Portuguese name fuzzy matching cannot bridge to a two-token one), and `Abdoul Ouattara` →
+  `Guemissongui Ouattara` — **different given names for the same player**, with a decoy present
+  (`Dango Ouattara` at Brentford matches on his own, so a surname-only rule would silently attach the
+  wrong club's player).
+- **FBRef (4):** `Igor Thiago`, `Estêvão Willian`, `Abdul Fatawu Issahaku`, and `Bachir Belloumi`
+  (FPL calls him *Mohamed* Belloumi — same club, Hull City, confirms identity).
+
+**Structural bug found while fixing this, worth recording.** Adding the FBRef names to the shared
+`manual_mappings.json` **silently broke two working Understat matches**: Understat spells them `Thiago`
+and `Estêvão`, FBRef spells them `Igor Thiago` and `Estêvão Willian`, and one file cannot hold two
+targets for one FPL name (verified — `Igor Thiago` does not exist in Understat's data at all). A single
+shared matcher for two differently-spelled sources is the underlying design flaw. Fixed properly:
+`load_manual_mappings` now **merges** instead of replacing, and `EnhancedDataCollector` builds a separate
+`fbref_matcher` that layers `player_mapping/fbref_mappings.json` on top of the shared file. All three
+FBRef call sites (bulk match, per-player match, and the promoted-team Championship fallback — also FBRef
+data) use it.
+
+**Verified after the fix:** Understat 312 matched, FBRef 352 matched, and **0 players with minutes
+unmatched on either source**.
+
 ### Known remaining gaps (do not assume these are done)
 - The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
   `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and

@@ -41,9 +41,23 @@ class EnhancedDataCollector:
         self.understat_scraper = UnderstatScraper()
         self.fbref_scraper = FBRefScraper(cache_dir=str(base_dir / "cache"))
         self.cache = DataCache(cache_dir=str(base_dir / "cache"), ttl_hours=cache_ttl_hours)
+        mapping_dir = base_dir / "player_mapping"
         self.matcher = PlayerNameMatcher(
-            manual_mappings_path=str(base_dir / "player_mapping" / "manual_mappings.json")
+            manual_mappings_path=str(mapping_dir / "manual_mappings.json")
         )
+        # FBRef needs its OWN overrides because the two sources spell the same
+        # player differently, and one shared file cannot hold two targets for
+        # one FPL name. Concretely: Understat calls him "Thiago" while FBRef
+        # calls him "Igor Thiago"; pointing the shared mapping at the FBRef form
+        # silently BREAKS the Understat match (verified — 'Igor Thiago' does not
+        # exist in Understat's data at all). This matcher starts from the shared
+        # file and layers FBRef-specific names on top.
+        self.fbref_matcher = PlayerNameMatcher(
+            manual_mappings_path=str(mapping_dir / "manual_mappings.json")
+        )
+        fbref_overrides = mapping_dir / "fbref_mappings.json"
+        if fbref_overrides.exists():
+            self.fbref_matcher.load_manual_mappings(str(fbref_overrides))
 
     def fetch_understat_data(self, season: str = CURRENT_SEASON, use_cache: bool = True) -> List[Dict]:
         """
@@ -472,8 +486,10 @@ class EnhancedDataCollector:
         fbref_unmatched = []
         if fbref_players:
             print(f"🔗 Matching {len(fpl_players)} FPL players to {len(fbref_players)} FBRef players...")
-            self.matcher.clear_log()
-            matched_fbref, fbref_unmatched = self.matcher.match_all_players(
+            # fbref_matcher, not matcher — FBRef spells some players
+            # differently from Understat (see __init__).
+            self.fbref_matcher.clear_log()
+            matched_fbref, fbref_unmatched = self.fbref_matcher.match_all_players(
                 fpl_players,
                 fbref_players,
                 threshold=match_threshold
@@ -493,8 +509,10 @@ class EnhancedDataCollector:
                         f"🔗 Retrying {len(promoted_unmatched)} promoted-team players against "
                         f"{len(championship_players)} Championship FBRef players..."
                     )
-                    self.matcher.clear_log()
-                    matched_championship, still_unmatched = self.matcher.match_all_players(
+                    # Championship data is also FBRef, so it needs the FBRef
+                    # spelling overrides too.
+                    self.fbref_matcher.clear_log()
+                    matched_championship, still_unmatched = self.fbref_matcher.match_all_players(
                         promoted_unmatched,
                         championship_players,
                         threshold=match_threshold
@@ -643,7 +661,7 @@ class EnhancedDataCollector:
         # Match FBRef using fuzzy matching
         fbref_match = None
         if fbref_players:
-            fbref_match = self.matcher.match_player(
+            fbref_match = self.fbref_matcher.match_player(
                 fpl_player,
                 fbref_players,
                 team_id=fpl_player.get('team')
