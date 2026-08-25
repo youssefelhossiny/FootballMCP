@@ -45,3 +45,6 @@ build/
 # Logs
 *.log
 npm-debug.log*
+
+# Bot runtime artifacts (decisions + logs live in ~/.clankerfc at runtime)
+fpl-optimizer/logs/

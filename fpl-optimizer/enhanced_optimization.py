@@ -345,6 +345,121 @@ class EnhancedOptimizer:
 
         return squad, lineup, "✅ Optimal squad found!"
 
+    def optimize_from_shortlist(
+        self,
+        shortlist: List[Dict],
+        budget: float = 100.0,
+        bench_spend_cap: float = 18.0,
+        min_bank: float = 0.0,
+    ) -> Tuple[List[Dict], Dict, str]:
+        """
+        Pick the best legal 15 from a strategy-tagged shortlist.
+
+        Differs from `_optimize_with_bench_strategy` in three ways, each fixing a
+        verified defect:
+
+        1. **Objective is ML predicted points, not `form`.** `form` is 0.0 for
+           all 600 players before a season starts, which made the old objective
+           FLAT (`max(0 * fdr, 0.01)` == 0.01 for everyone) — the LP was
+           returning an arbitrary feasible squad exactly when the opening squad
+           is chosen. Each shortlist entry carries `predicted_points` from the
+           v2 model, which was trained on real per-gameweek outcomes and still
+           discriminates with no current-season form.
+
+        2. **The bench is scored, at a discount.** The old objective summed only
+           `starting[...]`, so bench players were worth nothing — while
+           `total_cost >= target_spend` forced money to be spent, and the
+           unscored bench was the only place left to put it. Bench picks now
+           contribute at BENCH_WEIGHT, which is what makes them "cheap but
+           actually useful" instead of either free filler or accidental luxury.
+
+        3. **Bench spend is CAPPED and the budget is not force-spent.** Money
+           not spent on the bench upgrades a starter. `min_bank` allows
+           deliberately holding cash for an early transfer.
+        """
+        # Bench points are real but only materialise via rotation and auto-subs,
+        # so they are worth having without being worth paying up for.
+        BENCH_WEIGHT = 0.25
+
+        by_id = {p["id"]: p for p in shortlist}
+        ids = list(by_id)
+        if len(ids) < 15:
+            return [], {}, f"Shortlist too small ({len(ids)} players)"
+
+        prob = LpProblem("FPL_Squad_Strategy", LpMaximize)
+        selected = {i: LpVariable(f"sel_{i}", cat="Binary") for i in ids}
+        starting = {i: LpVariable(f"st_{i}", cat="Binary") for i in ids}
+
+        def pts(i):
+            return float(by_id[i].get("predicted_points") or 0.0)
+
+        def price(i):
+            return float(by_id[i]["price"])
+
+        def pos(i):
+            return int(by_id[i]["position_id"])
+
+        # Starters at full weight, bench at a discount. `selected - starting`
+        # is 1 exactly for bench players, so this scores both tiers in one pass.
+        prob += lpSum(
+            pts(i) * starting[i] + BENCH_WEIGHT * pts(i) * (selected[i] - starting[i])
+            for i in ids
+        )
+
+        prob += lpSum(selected[i] for i in ids) == 15
+        prob += lpSum(starting[i] for i in ids) == 11
+        for i in ids:
+            prob += starting[i] <= selected[i]
+
+        prob += lpSum(price(i) * selected[i] for i in ids) <= budget - min_bank
+
+        # THE key structural constraint: bench (selected but not starting) may
+        # not absorb more than the cap. This is what keeps spend on the pitch.
+        prob += lpSum(
+            price(i) * (selected[i] - starting[i]) for i in ids
+        ) <= bench_spend_cap
+
+        for pid, (_, count) in self.CONSTRAINTS["positions"].items():
+            pool = [i for i in ids if pos(i) == pid]
+            prob += lpSum(selected[i] for i in pool) == count
+
+        prob += lpSum(starting[i] for i in ids if pos(i) == 1) == 1
+        for pid, (lo, hi) in ((2, (3, 5)), (3, (2, 5)), (4, (1, 3))):
+            pool = [i for i in ids if pos(i) == pid]
+            prob += lpSum(starting[i] for i in pool) >= lo
+            prob += lpSum(starting[i] for i in pool) <= hi
+
+        teams = {}
+        for i in ids:
+            teams.setdefault(by_id[i]["team_id"], []).append(i)
+        for pool in teams.values():
+            prob += lpSum(selected[i] for i in pool) <= 3
+
+        prob.solve(PULP_CBC_CMD(msg=0))
+        if LpStatus[prob.status] != "Optimal":
+            return [], {}, f"No optimal solution: {LpStatus[prob.status]}"
+
+        squad = [by_id[i] for i in ids if selected[i].varValue == 1]
+        xi = [by_id[i] for i in ids if starting[i].varValue == 1]
+        bench = [p for p in squad if p not in xi]
+
+        d = sum(1 for p in xi if p["position_id"] == 2)
+        m = sum(1 for p in xi if p["position_id"] == 3)
+        f = sum(1 for p in xi if p["position_id"] == 4)
+
+        total = sum(p["price"] for p in squad)
+        bench_cost = sum(p["price"] for p in bench)
+        return squad, {
+            "starting": xi,
+            "bench": bench,
+            "formation": f"{d}-{m}-{f}",
+            "total_cost": round(total, 1),
+            "bench_cost": round(bench_cost, 1),
+            "xi_cost": round(total - bench_cost, 1),
+            "bank": round(budget - total, 1),
+            "predicted_xi_points": round(sum(p.get("predicted_points", 0) for p in xi), 2),
+        }, "Optimal squad found"
+
     def _calculate_expected_points(
         self,
         squad: List[Dict],

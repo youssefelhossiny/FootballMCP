@@ -442,6 +442,23 @@ FPL_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_squad_strategy",
+            "description": "Get FPL squad-construction STRATEGY analysis for the upcoming gameweeks: which teams are best placed to keep CLEAN SHEETS (fixture softness combined with FPL's own defensive-strength ratings), budget-defender ROTATION PAIRS whose good fixtures fall in different gameweeks (so one of the pair always has a favourable game), VALUE picks by points-per-million, xG BARGAINS (players scoring below their expected goals on high underlying threat — the chances are there and finishing tends to correct), and REGRESSION RISKS (players scoring well above xG, whose price is inflated by finishing luck that will not repeat). Use this when deciding transfers, planning a wildcard, or judging whether a player is genuinely good value rather than just in form. This is strategic context to reason WITH, not a squad to copy.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "num_gameweeks": {
+                        "type": "integer",
+                        "description": "How many gameweeks ahead to analyse (default 5, max 10). Transfers should be judged over 3-5."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_ml_prediction",
             "description": "Get machine-learning predicted points for the NEXT gameweek, plus the probability each player actually starts (60+ minutes). Trained on real historical per-gameweek outcomes across three seasons. Use this as ONE input among several when advising on transfers, captaincy or lineups — it is a useful ranking signal (its top picks historically averaged ~1.5 more points per pick than a recent-form heuristic) but it deliberately under-predicts big hauls, so treat it as 'who is likely to do well', not 'exactly how many points'. Always weigh it against injury/team news and fixtures rather than following it blindly. Pass player_names to score specific players (this fetches their real gameweek history for a more accurate answer), or omit to get the top-ranked players overall.",
             "parameters": {
@@ -559,6 +576,31 @@ def get_ssl_context():
 def format_price(price: int) -> str:
     """Convert price from API format (e.g., 115) to display (£11.5m)"""
     return f"£{price / 10:.1f}m"
+
+
+def planning_gameweek(events: List[Dict]) -> int:
+    """
+    The gameweek that forward-looking advice should START from — the next
+    unplayed one, not the one already in progress.
+
+    `is_current` is the wrong anchor for planning. Mid-season it points at the
+    gameweek whose matches are being played right now, so a 5-gameweek fixture
+    window built from it leads with a gameweek nobody can still transfer for:
+    the first slot is wasted and the real forward view is only 4 deep. Before a
+    season's first deadline `is_current` is absent entirely, and a `, 1` fallback
+    silently hides the bug (it happens to equal the target in GW1 only).
+
+    Prefers `is_next`, then the first unfinished event, then `is_current`, and
+    only then 1 — so it degrades toward "something sane" rather than "GW1".
+    """
+    for key in ("is_next",):
+        gw = next((e["id"] for e in events if e.get(key)), None)
+        if gw is not None:
+            return gw
+    gw = next((e["id"] for e in events if not e.get("finished")), None)
+    if gw is not None:
+        return gw
+    return next((e["id"] for e in events if e.get("is_current")), 1)
 
 
 async def make_fpl_request(endpoint: str, params: dict = None) -> dict:
@@ -1213,6 +1255,11 @@ async def get_team_news_endpoint(team: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# In-process bot scheduler, set at startup. None when disabled (the default) or
+# when apscheduler is unavailable — /api/bot/schedule reports which.
+_bot_scheduler = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize models and fetch initial data"""
@@ -1231,7 +1278,33 @@ async def startup_event():
         print(f"⚠️  No v2 points model at {info['path']} — "
               "predictions unavailable (run: python ml_train.py)")
 
+    # Autonomous bot scheduling. Disabled by default: on Render's free tier the
+    # service is spun down when idle, and a spun-down process cannot fire a job —
+    # so an in-process scheduler there would advertise a bot that is not actually
+    # watching the deadline. The supported production path is an external cron
+    # hitting POST /api/bot/run, which wakes the service by calling it.
+    global _bot_scheduler
+    try:
+        import bot_scheduler as _bs
+
+        _bot_scheduler = _bs.BotScheduler(run_agent_and_maybe_submit)
+        outcome = await _bot_scheduler.start()
+        if outcome.get("started"):
+            print(f"Bot scheduler started: {outcome.get('runs')}")
+        else:
+            print(f"Bot scheduler not started — {outcome.get('reason')}")
+    except Exception as e:
+        # Never let scheduling break API startup; the endpoints still work.
+        print(f"⚠️  Bot scheduler unavailable: {e}")
+
     print("API ready with all MCP tools!")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the bot scheduler so a reload doesn't leave a job firing twice."""
+    if _bot_scheduler is not None:
+        _bot_scheduler.shutdown()
 
 
 @app.get("/api/health")
@@ -1831,8 +1904,27 @@ async def get_user_team(team_id: int):
 
 
 # ============== BOT TEAM ENDPOINT ==============
-# Bot's FPL team ID - hardcoded for the autonomous bot
+# The bot's own FPL entry id. The historical default below DOES NOT EXIST —
+# verified live: GET /api/entry/12777515/ returns 404, so every bot endpoint
+# that resolves a squad has been failing with a confusing "Team not found"
+# rather than saying the id was never configured. Set BOT_TEAM_ID in .env
+# (your team id is in the URL at fantasy.premierleague.com/entry/<ID>/).
 BOT_TEAM_ID = int(os.getenv("BOT_TEAM_ID", "12777515"))
+BOT_TEAM_ID_CONFIGURED = bool(os.getenv("BOT_TEAM_ID"))
+
+
+def require_bot_team_id() -> int:
+    """Fail with an actionable message instead of a bare 404 from FPL."""
+    if not BOT_TEAM_ID_CONFIGURED:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "BOT_TEAM_ID is not configured, and the built-in default "
+                f"({BOT_TEAM_ID}) is not a real FPL team. Set BOT_TEAM_ID in .env "
+                "to the bot's entry id (see fantasy.premierleague.com/entry/<ID>/)."
+            ),
+        )
+    return BOT_TEAM_ID
 
 @app.get("/api/bot/auth-status")
 async def get_bot_auth_status():
@@ -2247,6 +2339,351 @@ async def get_price_changes():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def run_agent_and_maybe_submit(run_type: str = "final", submit: bool = False) -> Dict:
+    """
+    One autonomous decision, optionally written to FPL.
+
+    Shared by `GET /api/bot/agent-decision` (manual/inspection) and
+    `POST /api/bot/run` (scheduler/external cron) so the two paths cannot drift.
+
+    Raises `BotAgentError` when no decision could be made — the caller decides
+    whether that becomes a 503 or a recorded failed run. It must never be
+    flattened into an empty decision, which would read as "no changes needed".
+    """
+    from bot_agent import run_agent_decision, BotAgentError
+    import bot_scheduler
+
+    early = run_type == "early"
+    bot_team_id = require_bot_team_id()
+
+    # Take the target gameweek from FPL's `is_next` event, NOT from
+    # `get_user_team`'s gameweek + 1. That field comes from `is_current`, which
+    # is empty before a season's first deadline and falls back to 1 — so +1 gave
+    # GW2 while the deadline actually being played was GW1 (verified live on
+    # 2026-08-21). Submitting transfers against the wrong event id is not a
+    # cosmetic error: it targets the wrong gameweek entirely. `bot_scheduler`
+    # already resolves this correctly and is the single source of truth.
+    schedule = await bot_scheduler.get_gameweek_schedule()
+    target_gw = schedule.get("next_gameweek")
+    if target_gw is None:
+        raise BotAgentError(
+            "FPL reports no upcoming gameweek (season over, or bootstrap-static "
+            "unavailable). Refusing to guess a gameweek for a write."
+        )
+
+    team_data = await get_user_team(bot_team_id)
+    players, teams, _data = await fetch_enhanced_players()
+    context = build_comprehensive_context(
+        team_data, players, teams, None, None, str(bot_team_id)
+    )
+
+    decision = await run_agent_decision(
+        gameweek=target_gw,
+        context=context,
+        tools=FPL_TOOLS,
+        execute_tool_func=execute_tool,
+        players=players,
+        teams=teams,
+        team_data=team_data,
+        run_type=run_type,
+    )
+
+    result = {"decision": decision.to_dict(), "submitted": False}
+
+    if not submit:
+        return result
+
+    import fpl_auth
+
+    if decision.confidence == "low":
+        result["submit_skipped"] = (
+            "Agent reported low confidence — not submitting. Review by hand."
+        )
+        return result
+
+    try:
+        squad_ids = [p["id"] for p in team_data.get("players", [])]
+        writes = {}
+        squad_chip = decision.chip in ("wildcard", "freehit")
+
+        if decision.transfers:
+            prices = fpl_auth.get_squad_selling_prices(bot_team_id)
+            player_costs = {p["id"]: p.get("now_cost") for p in players}
+            payload = []
+            for t in decision.transfers:
+                priced = prices.get(t.player_out_id)
+                if not priced:
+                    raise fpl_auth.FPLAuthError(
+                        f"No selling price for {t.player_out_name} "
+                        f"(id {t.player_out_id}) — is he in the squad?"
+                    )
+                cost_in = player_costs.get(t.player_in_id)
+                if cost_in is None:
+                    raise fpl_auth.FPLAuthError(
+                        f"No current price for {t.player_in_name} (id {t.player_in_id})."
+                    )
+                payload.append({
+                    "element_out": t.player_out_id,
+                    "element_in": t.player_in_id,
+                    # What the sold player is worth (half of any rise, per
+                    # get_squad_selling_prices) vs what the bought player costs
+                    # right now. FPL's field name for the incoming side is
+                    # `purchase_price`, so `now_cost` is the correct value here.
+                    "selling_price": priced["selling_price"],
+                    "purchase_price": cost_in,
+                })
+            writes["transfers"] = fpl_auth.make_transfers(
+                bot_team_id, decision.gameweek, payload,
+                wildcard=decision.chip == "wildcard",
+                freehit=decision.chip == "freehit",
+            )
+            # Post-transfer squad, so the lineup payload reflects the new players.
+            for t in decision.transfers:
+                if t.player_out_id in squad_ids:
+                    squad_ids[squad_ids.index(t.player_out_id)] = t.player_in_id
+        elif squad_chip:
+            # A wildcard/freehit is activated by the TRANSFER endpoint, not the
+            # lineup one. Previously this branch didn't exist, so a chip decided
+            # with an empty transfer list was silently dropped: make_transfers
+            # was skipped, and set_lineup only forwards bboost/3xc. Refuse
+            # instead of pretending the chip was played.
+            raise fpl_auth.FPLAuthError(
+                f"Agent chose {decision.chip} but submitted no transfers. That chip is "
+                "activated through the transfer endpoint, so there is nothing to play it "
+                "on. Not submitting — re-run, or apply it by hand."
+            )
+
+        if not early:
+            lineup_chip = decision.chip if decision.chip in ("bboost", "3xc") else None
+            writes["lineup"] = fpl_auth.set_lineup(
+                bot_team_id, decision.to_lineup_picks(squad_ids), chip=lineup_chip
+            )
+
+        result["submitted"] = True
+        result["writes"] = writes
+        result["mode"] = fpl_auth.bot_mode()
+    except (fpl_auth.FPLAuthError, BotAgentError) as e:
+        # Decision is still valuable even if the write failed — return it with
+        # the error rather than 500ing and losing the analysis.
+        result["submit_error"] = str(e)
+        result["mode"] = fpl_auth.bot_mode()
+
+    return result
+
+
+@app.get("/api/strategy/squad")
+async def strategy_squad(budget: float = 100.0, num_gameweeks: int = 5,
+                         bench_cap: float = None, min_bank: float = 0.0):
+    """
+    Strategy-driven squad build (two-stage), replacing the flat-objective LP.
+
+    Stage 1 — `fpl_strategy` does the FPL THINKING: builds a fixture-anchored
+    shortlist tagged premium/core/value/rotation/bench, scores clean-sheet
+    outlook per team (fixture softness x FPL's own defensive-strength ratings),
+    finds budget-defender ROTATION PAIRS whose good fixtures fall in different
+    gameweeks, and surfaces value picks, xG-underperforming bargains and
+    overperforming regression risks.
+
+    Stage 2 — the LP assembles the best legal 15 FROM THAT SHORTLIST, maximising
+    v2-model predicted points with the bench scored at a discount and its spend
+    capped, so money stays on the pitch instead of being force-spent.
+
+    Why this exists: the previous builder optimised `form`, which is 0.0 for all
+    600 players pre-season, so its objective was flat and the squad was an
+    arbitrary feasible solution. It also never referenced the ML model.
+    """
+    import fpl_strategy
+    from enhanced_optimization import EnhancedOptimizer
+
+    data = await make_fpl_request("bootstrap-static/")
+    fixtures_data = await make_fpl_request("fixtures/")
+    if "error" in data:
+        raise HTTPException(status_code=502, detail=f"FPL API error: {data['error']}")
+
+    teams = {t["id"]: t for t in data.get("teams", [])}
+    start_gw = planning_gameweek(data.get("events", []))
+    num_gws = max(1, min(num_gameweeks, 10))
+
+    # Availability first — an unavailable player should never reach the shortlist.
+    available = availability_filter.filter_available_players(
+        data.get("elements", []), min_chance=SQUAD_MIN_CHANCE
+    )
+
+    # Enhanced players carry the Understat xG fields the value analysis needs.
+    try:
+        enriched, _t, _d = await fetch_enhanced_players()
+        by_id = {p["id"]: p for p in enriched}
+        available = [{**p, **{k: v for k, v in by_id.get(p["id"], {}).items()
+                              if k.startswith(("xG", "xA", "npxG", "threat"))}}
+                     for p in available]
+    except Exception as e:
+        print(f"strategy: enhanced stats unavailable ({e}); value analysis degrades to points/£m")
+
+    runs = fpl_strategy.build_fixture_runs(fixtures_data, teams, start_gw, num_gws)
+
+    # v2 model predictions — this is what replaces `form` as the ranking signal.
+    raw = ml_predict_v2.predict_points(available)
+    if not raw:
+        # Refuse rather than silently reverting to a form-based objective, which
+        # is flat pre-season and produced the arbitrary squad this replaces.
+        raise HTTPException(
+            status_code=503,
+            detail="v2 model unavailable — refusing to fall back to a flat `form` objective.",
+        )
+    predictions = {
+        pid: {
+            "predicted_points": v.get("predicted_points", 0.0),
+            "start_prob": v.get("play_probability", 0.0),
+        }
+        for pid, v in raw.items()
+    }
+
+    shortlist, meta = fpl_strategy.build_shortlist(
+        available, teams, runs, predictions
+    )
+    if len(shortlist) < 15:
+        raise HTTPException(status_code=503, detail="Shortlist too small to build a squad")
+
+    lp_rows = [{
+        "id": t.player_id, "name": t.name, "price": t.price,
+        "position_id": t.position, "team_id": t.team, "team": t.team_short,
+        "predicted_points": t.predicted_points, "start_prob": t.start_prob,
+        "role": t.role, "reasons": t.reasons,
+        "points_per_million": t.points_per_million, "xg_signal": t.xg_signal,
+        "good_fixture_gws": t.good_fixture_gws,
+    } for t in shortlist]
+
+    squad, lineup, status = EnhancedOptimizer().optimize_from_shortlist(
+        lp_rows, budget=budget,
+        bench_spend_cap=bench_cap if bench_cap is not None else fpl_strategy.BENCH_SPEND_CAP,
+        min_bank=min_bank,
+    )
+    if not squad:
+        raise HTTPException(status_code=503, detail=status)
+
+    return {
+        "gameweek": start_gw,
+        "horizon_gameweeks": num_gws,
+        "formation": lineup["formation"],
+        "total_cost": lineup["total_cost"],
+        "xi_cost": lineup["xi_cost"],
+        "bench_cost": lineup["bench_cost"],
+        "bank": lineup["bank"],
+        "predicted_xi_points": lineup["predicted_xi_points"],
+        "starting_xi": sorted(lineup["starting"],
+                              key=lambda p: (p["position_id"], -p["predicted_points"])),
+        "bench": sorted(lineup["bench"], key=lambda p: (p["position_id"] != 1,
+                                                       -p["predicted_points"])),
+        "strategy": meta,
+        "model": ml_predict_v2.model_info(),
+    }
+
+
+@app.get("/api/bot/agent-decision")
+async def get_bot_agent_decision(early: bool = False, submit: bool = False):
+    """
+    Autonomous gameweek decision made by the Claude tool-loop (Task 6).
+
+    Differs from /api/bot/decision, which runs `bot_decision_maker`'s hand-written
+    arithmetic (`form * 3 + fixture_score`) and references neither the retrained
+    v2 model nor any live news source. This endpoint runs the same tool set the
+    chat uses — ML predictions, third-party team news, live web search — and the
+    model owns the judgment while the LP optimizer keeps owning the constraints.
+
+    Parameters:
+    - early: early run (price-timing transfers only, no captain/chip) vs final run
+    - submit: also write the decision to FPL via fpl_auth. Still gated by
+      FPL_BOT_MODE (default `notify` writes nothing), and refused on a low-confidence
+      decision — an unverified call should never reach a real team.
+    """
+    from bot_agent import BotAgentError
+
+    try:
+        return await run_agent_and_maybe_submit(
+            run_type="early" if early else "final", submit=submit
+        )
+    except BotAgentError as e:
+        # 503 so a caller can distinguish a failed run from a valid empty decision.
+        raise HTTPException(status_code=503, detail=f"Agent could not decide: {e}")
+
+
+@app.post("/api/bot/run")
+async def trigger_bot_run(
+    run_type: Optional[str] = None,
+    force: bool = False,
+    submit: bool = True,
+    _: bool = Depends(verify_token),
+):
+    """
+    Trigger a scheduled bot run. **This is the production path on Render's free
+    tier**, where an in-process scheduler cannot be trusted — a dozing service is
+    not running, so APScheduler is not late, it is absent. An external cron
+    hitting this endpoint wakes the service by the act of calling it.
+
+    Authenticated (same JWT as /api/chat) so a public URL can't drive the bot.
+
+    Parameters:
+    - run_type: 'early' or 'final'. Omit to auto-detect what is due now, which is
+      what a periodic cron should do.
+    - force: run even if this gameweek's run already completed.
+    - submit: write the decision (still gated by FPL_BOT_MODE, default notify).
+
+    Never 500s on an agent failure: the failure is recorded and returned, so a
+    cron's logs show what happened rather than a silent nothing.
+    """
+    import bot_scheduler
+
+    if run_type is None:
+        due = await bot_scheduler.due_runs()
+        if not due:
+            schedule = await bot_scheduler.get_gameweek_schedule()
+            return {
+                "ran": False,
+                "reason": "Nothing due now.",
+                "next_gameweek": schedule.get("next_gameweek"),
+                "deadline": schedule["deadline"].isoformat() if schedule.get("deadline") else None,
+            }
+        # Final wins if somehow both are due — it is the one that must not be missed.
+        run_type = "final" if "final" in due else due[0]
+    elif run_type not in ("early", "final"):
+        raise HTTPException(status_code=400, detail="run_type must be 'early' or 'final'")
+
+    outcome = await bot_scheduler.execute_run(
+        run_type, run_agent_and_maybe_submit, force=force, submit=submit
+    )
+    return {"ran": outcome.get("ok", False), **outcome}
+
+
+@app.get("/api/bot/schedule")
+async def get_bot_schedule():
+    """
+    Upcoming deadline, planned run times, what's due now, and recent run history.
+    Read-only — safe to poll, and the fastest way to see whether the bot is
+    actually watching the deadline or just configured to look like it is.
+    """
+    import bot_scheduler
+
+    schedule = await bot_scheduler.get_gameweek_schedule()
+    planned = {}
+    if schedule.get("deadline"):
+        planned = {
+            k: v.isoformat()
+            for k, v in bot_scheduler.compute_run_times(
+                schedule["deadline"], schedule.get("previous_deadline")
+            ).items()
+        }
+
+    return {
+        "next_gameweek": schedule.get("next_gameweek"),
+        "deadline": schedule["deadline"].isoformat() if schedule.get("deadline") else None,
+        "planned_runs": planned,
+        "due_now": await bot_scheduler.due_runs(),
+        "in_process_scheduler": _bot_scheduler.status() if _bot_scheduler else {"running": False},
+        "recent_runs": bot_scheduler.run_history(10),
+        "bot_mode": __import__("fpl_auth").bot_mode(),
+    }
+
+
 # ============== CHAT ENDPOINT WITH ALL TOOLS ==============
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
@@ -2652,6 +3089,10 @@ async def execute_tool(tool_name: str, args: Dict, players: List[Dict], teams: D
             return await tool_search_player_news(names, players, teams)
 
         # === get_ml_prediction - v2 model predicted points ===
+        elif tool_name == "get_squad_strategy":
+            n = args.get("num_gameweeks", 5)
+            return await tool_squad_strategy(min(max(int(n or 5), 1), 10))
+
         elif tool_name == "get_ml_prediction":
             names = args.get("player_names") or []
             position = args.get("position", "all")
@@ -2718,6 +3159,96 @@ def tool_get_top_players(players: List[Dict], teams: Dict, metric: str, position
     return "\n".join(lines)
 
 
+async def tool_squad_strategy(num_gws: int) -> str:
+    """
+    Strategy analysis as prose the agent can reason over.
+
+    Deliberately returns the ANALYSIS, not a squad. The agent's job is judgment —
+    weighing a clean-sheet target against team news, deciding whether a
+    regression risk is still worth owning — so handing it a finished squad would
+    replace the reasoning this tool exists to inform.
+    """
+    import fpl_strategy
+
+    data = await make_fpl_request("bootstrap-static/")
+    fixtures_data = await make_fpl_request("fixtures/")
+    if "error" in data:
+        return f"Could not load FPL data: {data['error']}"
+
+    teams = {t["id"]: t for t in data.get("teams", [])}
+    start_gw = planning_gameweek(data.get("events", []))
+    available = availability_filter.filter_available_players(
+        data.get("elements", []), min_chance=SQUAD_MIN_CHANCE
+    )
+
+    # Understat xG fields power the bargain/regression analysis.
+    try:
+        enriched, _t, _d = await fetch_enhanced_players()
+        by_id = {p["id"]: p for p in enriched}
+        available = [{**p, **{k: v for k, v in by_id.get(p["id"], {}).items()
+                              if k.startswith(("xG", "xA", "npxG"))}}
+                     for p in available]
+    except Exception:
+        pass  # value analysis degrades to points/£m; still useful
+
+    raw = ml_predict_v2.predict_points(available)
+    if not raw:
+        return "Strategy analysis unavailable: the points model could not be loaded."
+    preds = {pid: {"predicted_points": v.get("predicted_points", 0.0),
+                   "start_prob": v.get("play_probability", 0.0)}
+             for pid, v in raw.items()}
+
+    runs = fpl_strategy.build_fixture_runs(fixtures_data, teams, start_gw, num_gws)
+    _shortlist, meta = fpl_strategy.build_shortlist(available, teams, runs, preds)
+
+    out = [f"**Squad strategy — GW{start_gw} to GW{start_gw + num_gws - 1}**", ""]
+
+    out.append("**Best clean-sheet outlook** (fixture softness x defensive strength):")
+    for t in meta["clean_sheet_teams"][:6]:
+        out.append(f"  {t['team']}: score {t['cs_score']}, avg FDR {t['avg_fdr']}")
+    out.append("  A strong defence with a hard run still concedes — pair these with team news.")
+    out.append("")
+
+    if meta["rotation_pairs"]:
+        out.append("**Budget rotation pairs** (complementary fixtures — start whichever has the better game):")
+        for pr in meta["rotation_pairs"][:4]:
+            out.append(
+                f"  {pr['players'][0]} ({pr['teams'][0]}) + {pr['players'][1]} "
+                f"({pr['teams'][1]}) £{pr['combined_price']}m — good fixtures cover "
+                f"GW{pr['covered_gameweeks']}, overlap GW{pr['overlap_gameweeks'] or 'none'}"
+            )
+        out.append("")
+
+    if meta["value_picks"]:
+        out.append("**Best value** (points per £m, cheap and playing):")
+        for v in meta["value_picks"][:6]:
+            out.append(f"  {v['name']} ({v['team']}) {v['position']} £{v['price']}m — "
+                       f"{v['points_per_million']} pts/£m, {v['start_prob']:.0%} to start")
+        out.append("")
+
+    if meta["underperforming_bargains"]:
+        out.append("**xG bargains** (scoring BELOW expected on real chances — tends to correct):")
+        for v in meta["underperforming_bargains"][:5]:
+            note = next((r for r in v["reasons"] if "BELOW xG" in r), "")
+            out.append(f"  {v['name']} ({v['team']}) £{v['price']}m — {note}")
+        out.append("")
+
+    if meta["regression_risks"]:
+        out.append("**Regression risks** (scoring ABOVE xG — price inflated by finishing luck):")
+        for v in meta["regression_risks"][:5]:
+            note = next((r for r in v["reasons"] if "above xG" in r), "")
+            out.append(f"  {v['name']} ({v['team']}) £{v['price']}m — {note}")
+        out.append("")
+
+    br = meta["budget_rules"]
+    out.append(
+        f"**Budget principle:** keep bench spend under ~£{br['bench_spend_cap']}m, and require "
+        f"bench players to be >={br['bench_min_start_prob']:.0%} likely to start — a substitute who "
+        "never plays is not cover. Money saved on the bench upgrades a starter."
+    )
+    return "\n".join(out)
+
+
 async def tool_get_fixtures(team_filter: Optional[str], num_gws: int) -> str:
     """Get upcoming fixtures"""
     data = await make_fpl_request("bootstrap-static/")
@@ -2727,7 +3258,10 @@ async def tool_get_fixtures(team_filter: Optional[str], num_gws: int) -> str:
         return "Failed to fetch fixtures data"
 
     teams_dict = {t['id']: t for t in data.get('teams', [])}
-    current_gw = next((e['id'] for e in data['events'] if e.get('is_current')), 1)
+    # Planning window starts at the NEXT unplayed gameweek. Anchoring on
+    # is_current would lead the list with a gameweek already being played,
+    # wasting the first slot and shortening the real forward view by one.
+    current_gw = planning_gameweek(data['events'])
 
     upcoming = [f for f in fixtures_data if f.get('event') and current_gw <= f['event'] < current_gw + num_gws]
 
@@ -2764,7 +3298,8 @@ async def tool_analyze_fixtures(num_gws: int) -> str:
         return "Failed to fetch fixture data"
 
     teams_dict = {t['id']: t for t in data.get('teams', [])}
-    current_gw = next((e['id'] for e in data['events'] if e.get('is_current')), 1)
+    # Forward-looking advice plans from the next unplayed gameweek (see planning_gameweek).
+    current_gw = planning_gameweek(data['events'])
 
     # Calculate average FDR for each team
     team_fdr = {}
@@ -3193,7 +3728,8 @@ async def tool_chip_strategy(available_chips: List[str]) -> str:
     if "error" in data:
         return "Failed to fetch data for chip analysis"
 
-    current_gw = next((e['id'] for e in data['events'] if e.get('is_current')), 1)
+    # Forward-looking advice plans from the next unplayed gameweek (see planning_gameweek).
+    current_gw = planning_gameweek(data['events'])
 
     # Find double gameweeks or blank gameweeks
     lines = [f"**Chip Strategy (Available: {', '.join(available_chips)})**:", ""]

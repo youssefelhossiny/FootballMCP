@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job for the autonomous FPL bot.
+
+  ## Install
+
+      cd ~/Documents/GitHub/Football-MCP/fpl-optimizer
+      cp run_bot.sh mcp_bot.json ~/.clankerfc/        # runtime copy, see below
+      cp com.clankerfc.fplbot.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.clankerfc.fplbot.plist
+
+  ## Why the script runs from ~/.clankerfc and NOT from the repo
+
+  macOS TCC blocks launchd-spawned processes from reading ~/Documents at all.
+  Pointing this at the repo copy fails with "Operation not permitted" and exit
+  code 126 even though run_bot.sh is -rwxr-xr-x — it is a privacy gate, not a
+  file permission. The alternative (granting /bin/bash Full Disk Access) would
+  hand every bash script on the machine full disk access, which is far too
+  broad for one bot. So the script + MCP config are COPIED to ~/.clankerfc,
+  which TCC does not protect. The repo keeps the canonical copy under version
+  control; re-copy after editing.
+
+  ## Check / remove
+
+      launchctl list | grep clankerfc
+      launchctl unload ~/Library/LaunchAgents/com.clankerfc.fplbot.plist
+
+  ## Why hourly rather than two precise cron times
+
+  FPL moves deadlines (midweek gameweeks, TV rescheduling), so a hardcoded
+  "Friday 15:30" rots. Instead this ticks HOURLY and `run_bot.sh` asks
+  `bot_scheduler.due_runs()` — which reads FPL's own published deadlines —
+  whether anything is actually due. A tick where nothing is due costs ~0.9s of
+  Python and invokes no model at all (measured), so the hourly cadence is
+  effectively free while staying robust to a moved deadline.
+
+  ## RunAtLoad
+
+  True on purpose: if the Mac was asleep or off through a scheduled window, the
+  job runs on wake/login and `due_runs()`'s grace window (90 min for the early
+  run; the final run stays due right up to the deadline) can still catch it.
+  A missed deadline is the failure mode worth guarding against.
+
+  ## Caveat this cannot fix
+
+  launchd does not run while the machine is powered off, and a sleeping Mac
+  only runs this if it wakes. To make deadline coverage reliable, schedule a
+  wake with pmset, e.g.:
+
+      sudo pmset repeat wakeorpoweron MTWRFSU 13:00:00
+
+  Without that, treat this as best-effort — which is also why FPL_BOT_MODE
+  stays `notify` and the agent has read-only tools.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clankerfc.fplbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/youssefelhossiny/.clankerfc/run_bot.sh</string>
+    </array>
+
+    <!-- Hourly. The tick is a no-op unless the scheduler says a run is due. -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/youssefelhossiny/.clankerfc</string>
+
+    <!--
+      launchd gives a job a minimal PATH that does NOT include nvm, so the
+      `claude` binary would not be found. run_bot.sh also accepts CLAUDE_BIN as
+      an override; both are set so either path works.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/youssefelhossiny/.nvm/versions/node/v22.14.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLAUDE_BIN</key>
+        <string>/Users/youssefelhossiny/.nvm/versions/node/v22.14.0/bin/claude</string>
+        <key>HOME</key>
+        <string>/Users/youssefelhossiny</string>
+        <!--
+          Set this once Clanker FC exists, so the bot analyses the real squad
+          instead of giving generic advice:
+          <key>BOT_TEAM_ID</key><string>1234567</string>
+        -->
+    </dict>
+
+    <!-- stdout/stderr from launchd itself; the script keeps its own log. -->
+    <key>StandardOutPath</key>
+    <string>/Users/youssefelhossiny/.clankerfc/logs/launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/youssefelhossiny/.clankerfc/logs/launchd.err</string>
+</dict>
+</plist>

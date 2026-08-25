@@ -249,6 +249,41 @@ def set_lineup(team_id: int, picks: List[Dict], chip: Optional[str] = None) -> D
             "detail": None if ok else resp.text[:300], "intended": body}
 
 
+def get_squad_selling_prices(team_id: int) -> Dict[int, Dict[str, int]]:
+    """
+    Per-player purchase and selling price for the current squad, keyed by element id.
+
+    Required because a transfer payload must carry the *selling* price, which is
+    NOT `now_cost`: FPL returns only half of any price rise (rounded down), so a
+    player bought at 7.0 who is now 7.3 sells for 7.1. Submitting `now_cost`
+    instead makes FPL reject the transfer, or silently mis-price the budget.
+
+    Only the authenticated `/api/my-team/{id}/` endpoint exposes this — the
+    public `/entry/{id}/event/{gw}/picks/` used by `get_user_team` does not.
+    Values are in FPL's tenths-of-a-million integer units, as the write API wants.
+    """
+    token = get_access_token()
+    resp = httpx.get(
+        f"{FPL_API}/my-team/{team_id}/",
+        headers=_auth_headers(token, "/a/team/my"),
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise FPLAuthError(
+            f"Could not read my-team for selling prices (HTTP {resp.status_code}). "
+            "Transfers cannot be priced without it."
+        )
+    picks = resp.json().get("picks", [])
+    return {
+        p["element"]: {
+            "purchase_price": p.get("purchase_price"),
+            "selling_price": p.get("selling_price"),
+        }
+        for p in picks
+        if p.get("selling_price") is not None
+    }
+
+
 def make_transfers(team_id: int, gameweek: int, transfers: List[Dict],
                    wildcard: bool = False, freehit: bool = False) -> Dict:
     """

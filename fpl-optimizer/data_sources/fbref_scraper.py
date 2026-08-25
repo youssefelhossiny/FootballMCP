@@ -181,6 +181,7 @@ def _fetch_extended_player_stats(
 
         html_table = None
         last_error = None
+        last_page_text = ""
         for attempt in range(max_attempts):
             if attempt == 0:
                 if filepath.exists():
@@ -193,6 +194,7 @@ def _fetch_extended_player_stats(
                 # driver instead so a slow-clearing interstitial has a chance
                 # to resolve before we give up.
                 page_source = _wait_for_table_html(fbref_client._driver, url, marker)
+                last_page_text = page_source
                 if not fbref_client.no_store:
                     filepath.parent.mkdir(parents=True, exist_ok=True)
                     filepath.write_text(page_source, encoding="utf-8")
@@ -215,9 +217,27 @@ def _fetch_extended_player_stats(
                 html_table = None
 
         if html_table is None:
+            # Distinguish "blocked" from "no such table". Conflating them is what
+            # produced a wrong diagnosis in ROADMAP for weeks: the 2026/27 pages
+            # were assumed to be anti-bot-blocked when in fact Selenium loads
+            # them fine and they simply have NO stats table yet (no matches
+            # played). A Cloudflare challenge leaves its own fingerprint in the
+            # page; a missing table does not.
+            page = (last_page_text or "").lower()
+            blocked_markers = ("cf-mitigated", "just a moment", "challenge-platform",
+                               "cf-chl", "attention required")
+            looks_blocked = any(m in page for m in blocked_markers)
+            if looks_blocked:
+                detail = ("Cloudflare/anti-bot challenge did not clear — the page never "
+                          "rendered. Retrying later may help.")
+            else:
+                detail = ("the page loaded but contains no "
+                          f"'stats_{stat_type}' table — most likely this season has no "
+                          "published data yet (no matches played). Retrying will NOT help "
+                          "until FBRef publishes it.")
             raise RuntimeError(
-                f"Could not load FBRef '{stat_type}' table after {max_attempts} attempts "
-                f"(likely a consent-banner/anti-bot interstitial): {last_error}"
+                f"Could not load FBRef '{stat_type}' table after {max_attempts} attempts: "
+                f"{detail} (last error: {last_error})"
             )
 
         df_table = _parse_table(html_table)
@@ -258,10 +278,22 @@ class FBRefScraper:
         if cache_dir is None:
             cache_dir = str(Path(__file__).parent.parent / "cache")
         self.cache = DataCache(cache_dir=cache_dir, ttl_hours=6)
-        # Separate, much shorter TTL for "this season isn't available" markers.
-        # Long enough to keep interactive tool calls fast, short enough that a
-        # season going live is picked up within the hour rather than after 6.
-        self.failure_cache = DataCache(cache_dir=cache_dir, ttl_hours=1)
+        # Separate TTL for "this season isn't available" markers.
+        #
+        # Was 1 hour, which is far too aggressive: a retry costs ~11 MINUTES of
+        # wall clock (5 stat types x 2-3 attempts x a 40s table-marker timeout,
+        # measured) and, before a season's first matches are played, it CANNOT
+        # succeed — FBRef has no player-stats table to serve until there are
+        # stats. So the hourly retry was pure waste that repeatedly stalled
+        # interactive tool calls.
+        #
+        # 12h keeps a newly-live season being picked up the same day while
+        # making the stall rare. Override with FBREF_FAILURE_TTL_HOURS (set it
+        # low around a season rollover if you want faster detection).
+        self.failure_cache = DataCache(
+            cache_dir=cache_dir,
+            ttl_hours=float(os.getenv("FBREF_FAILURE_TTL_HOURS", "12")),
+        )
 
     def _rate_limit(self):
         """Implement rate limiting (6 seconds for FBRef)"""

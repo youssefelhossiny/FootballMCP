@@ -529,19 +529,619 @@ convenience layer, never as a guarantee that a deadline was met.
 
 ---
 
-## TASK 6 — Autonomous scheduling + two-agent debate (GW2+)  ⬜
-`bot_scheduler.py` — in-process APScheduler via FastAPI lifespan. Deadline-detection loop
-(`get_next_gameweek:185`, `get_gameweek_deadline:192`) schedules per GW:
-- **Decision = Claude tool-loop with a two-agent debate:** a proposer and a challenger/critic (each with
-  the MCP tools: ML, injuries, price, fixtures, optimizer) deliberate and converge on the transfer +
-  captain before committing. Reduces single-model bias.
-- **Early run** (post-matches, pre price-update): transfer early only if merit-justified AND price
-  timing costly (new `should_execute_early` gate over price flags `evaluate_transfers:894-897,924-928`).
-  No captain/chip early.
-- **Final run** (~1–2h pre-deadline): latest news/injuries → transfer + captain + lineup → submit.
-- Recompute next deadline each GW. Auth failure → **notify user**, downgrade to `notify`.
-- Concurrency lock; stateless recovery (FPL API = source of truth); Render doze mitigation
-  (uptime pinger or cron service).
+## TASK 6 — Autonomous scheduling + AI decision layer  🚧 (agent + scheduler done; debate not started)
+
+### The gap this task actually had to close (found by reading the code, not the plan)
+There were **two brains in this repo and they shared nothing**:
+- **Chat** (`anthropic_chat.query_anthropic:217`) — a real Claude tool-loop, 18 tools, ML + news.
+- **Bot** (`bot_decision_maker.make_decision:1090`) — hand-written arithmetic, and **grep confirms it
+  contains zero references to `ml_predict_v2`, `points_model`, `search_player_news`, or
+  `get_team_news`**. Concretely: captain = `(form * 3 + fixture_score) * position_weight` (`:994`),
+  replacement = `max(form * 2 + (5 - avg_difficulty) * 1.5)` with a hard `form < 3.0` cutoff (`:943`),
+  `lineup_changes=[]` with a literal `# TODO: Implement lineup optimization` (`:1105`), and
+  `expected_points_gain` = a raw form delta labelled as points.
+
+So the v2 model (+1.52 pts/pick, Wilcoxon p=0.014) and `search_player_news` (the Doku catch) ran in the
+chat and in `/api/bot/initial-squad`, but were **invisible to the recurring gameweek decision** — the one
+thing that would actually run autonomously. That was a bigger gap than the Doku issue in the handoff, and
+the same class of bug: a verified component built, never wired to its consumer.
+
+**Fix chosen: don't write a new agent — point the autonomous path at the chat's tool-loop.**
+`api_server.execute_tool:2525` is a plain async function with no FastAPI request coupling, so it is
+callable headlessly as-is. The deterministic code becomes the *tools*; the model becomes the *decider*.
+That is what the Architecture decision at the top of this file always said; the bot was the one place it
+never got applied.
+
+### What shipped
+1. **`bot_agent.py`** — autonomous entry point over the existing 18 tools.
+   - **Structured output, not prose.** The decision comes back through a `submit_decision` *tool call*
+     validated against a JSON schema, so the API retries on a malformed reply. Prose into a write path
+     is how you get a wrong captain. `AgentDecision.to_lineup_picks()` emits exactly the 15
+     `{element, position, is_captain, is_vice_captain}` dicts `fpl_auth.set_lineup` wants.
+   - **Fails loudly.** Every failure raises `BotAgentError`: API error, truncation, prose-without-a-
+     decision, iteration cap. Deliberate contrast with `query_anthropic`'s
+     `except Exception: return (None, [], [])` — in the chat that degrades to a rule-based fallback
+     (which is what hid the retired model for months); at 2am it would make a broken run
+     indistinguishable from "no changes needed".
+   - **A failing tool is surfaced, not blanked.** One tool raising returns
+     `"TOOL ERROR (name): ... Do not treat this as 'no issues found'"` so the model routes around it
+     instead of silently concluding nothing was wrong.
+   - `make_transfer` is filtered out of the agent's tool set — it only mutates the frontend's
+     theoretical squad, so an agent calling it would believe it had acted when nothing happened.
+   - Prompt encodes the known-issues list as rules: auto-substitution means **starting** a doubtful
+     player is free upside (never bench to "protect"), bench order best-player-first, buying vs
+     starting are different bars, live news beats FPL's `chance_of_playing`.
+   - Semantic validation the schema can't express: captain ≠ vice, 15 unique lineup ids, no
+     buy-and-sell-same-player, no double-sell, chip dropped on an early run.
+2. **`bot_scheduler.py`** — deadline detection from FPL's own `bootstrap-static` events (no hardcoded
+   calendar to rot), early/final run computation, concurrency lock, and run history in
+   `cache/bot_runs.json`. A **failed** run is recorded `ok: False` and therefore **not** treated as done,
+   so a retry picks it up.
+3. **Endpoints**: `GET /api/bot/agent-decision` (inspect; 503 on agent failure so a caller can tell it
+   apart from a valid empty decision), `POST /api/bot/run` (JWT-authed, auto-detects what's due — this is
+   the production path), `GET /api/bot/schedule` (deadline, planned runs, due-now, recent runs, bot_mode).
+4. **`.github/workflows/fpl-bot.yml`** — external cron every 30 min. See the Render finding below.
+5. **`fpl_auth.get_squad_selling_prices`** — a transfer payload needs the **selling** price, which is not
+   `now_cost`: FPL returns only half of a price rise (rounded down), so 7.0→7.3 sells at 7.1. Before this
+   nothing computed it; `selling_price` appeared only in a docstring. Only the authenticated
+   `/api/my-team/{id}/` exposes it.
+6. **Prompt caching on the agent loop** — added after measuring the first run's cost. An agentic loop
+   resends the whole history every turn, so input grows per iteration: measured **6.3k tokens on call 1,
+   27.6k on call 9, ~145k total across 9 calls**, with input ≈ **80% of the run's cost**. Two breakpoints
+   (last tool schema + system prompt, ~5.1k identical tokens per call) plus a **rolling breakpoint on the
+   newest tool-result block** convert the append-only prefix into 0.1x reads. Only the newest history
+   breakpoint is kept — the request cap is 4, and older prefixes stay cached by prefix match anyway.
+   `AgentDecision.usage` now reports input/output/cache_read/cache_write so a silent caching regression is
+   visible rather than assumed.
+   **Verified against the live API** (4-iteration run): `cache_read` = 26,789 of 38,019 input-side tokens
+   (**70% served from cache**), 36% cheaper on that short run; the share rises with iteration count as more
+   history accumulates.
+   **Cost correction:** an earlier estimate in this session used $15/$75 per Mtok. Claude Opus 5 is
+   **$5/$25**, so the 2026-08-21 run was ≈**$0.91**, not ~$2. `search_player_news` runs server-side web
+   searches billed separately, which is worth remembering when reading a bill against a single run.
+   The chat is unaffected by the growth curve — 1-3 tool calls never climbs past the first iterations.
+7. **Low-confidence decisions are not submitted.** The agent self-reports confidence and the prompt says
+   it gates the write; `submit=true` with `confidence: "low"` returns `submit_skipped`.
+
+### Verified live (2026-08-21, GW1 unplayed)
+Full run against real tools with a synthetic Arsenal-heavy squad — GW1 had no picks yet
+(`/entry/{id}/event/1/picks/` 404s for everyone pre-deadline), so a real-squad run is blocked by the
+calendar, not the code. **16 tool calls across 9 model iterations, 11 distinct tools**, and it produced
+things the deterministic path structurally cannot:
+- Caught **two 0%-flagged players (J.Timber, Saliba) in the starting XI** and a **second GK started**
+  alongside Raya — three slots guaranteed to return ~0. Rebuilt to a legal 3-5-2.
+- Recorded **5 availability overrides** where live news contradicted FPL's flag.
+- Chose **Rice over Saka as captain on minutes certainty** despite Saka having the higher ML score
+  (3.94 vs 3.65) — explicitly reasoning that a captain who plays 25 minutes costs double.
+- Applied the auto-sub rule correctly *and* argued a deliberate exception (benching G.Jesus, who no
+  source could even place in the squad, while keeping him first sub to retain the upside).
+- **Noticed `evaluate_transfer` returned "WAIT" for the wrong reason** — it compares raw season stats and
+  doesn't know Timber is 0%.
+- Declined to fabricate an element id it couldn't verify, and rolled the free transfer instead.
+Scheduler verified against live FPL data (GW1 deadline 2026-08-21T17:30Z → final run 15:30Z), plus unit
+coverage of midweek/tight-turnaround ordering, double-run skip, force, and failure recording.
+
+### Render free tier — the doze problem is NOT solved by a pinger; scheduler defaults OFF
+An in-process scheduler **cannot** be made reliable on Render free: the service is spun down when idle,
+and a spun-down process isn't late — it doesn't exist to fire. A self-pinger burns the same free instance
+hours it's trying to protect and Render still reserves the right to spin down. So `BOT_SCHEDULER_ENABLED`
+defaults to **false**, specifically so deploying this doesn't create the illusion of a bot watching the
+deadline while the host sleeps. The supported path is the external cron hitting `POST /api/bot/run`, which
+wakes the service by the act of calling it. The in-process scheduler remains for paid/always-on or local.
+
+### Also found (pre-existing, now surfaced)
+**`BOT_TEAM_ID`'s default team does not exist.** `GET /api/entry/12777515/` returns **404** (verified
+live), and `BOT_TEAM_ID` is set in no `.env` — so `/api/bot/decision`, `/api/bot/team` and the new agent
+endpoints have all been failing with a confusing "Team not found". Added `require_bot_team_id()`, which
+returns an actionable 503 naming the env var instead. **Set `BOT_TEAM_ID` in `.env` before the bot can
+run for real.**
+
+### Self-review pass (same session) — 4 real bugs found and fixed
+Reviewed the day's wiring rather than trusting it. All four were verified against the live API before
+fixing, and all are in code written *this session*:
+1. **Wrong gameweek on every write (worst of the four).** `run_agent_and_maybe_submit` derived the target
+   as `get_user_team()["gameweek"] + 1`. That field comes from FPL's `is_current` event, which is **empty
+   before a season's first deadline** and falls back to `1` — so the agent was told GW**2** while the
+   deadline actually being played was GW**1** (verified live 2026-08-21: `is_current: []`, `is_next: [1]`).
+   `make_transfers` posts that id as `event`, so transfers would have targeted the wrong gameweek — not
+   cosmetic. Now taken from `bot_scheduler.get_gameweek_schedule()`'s `next_gameweek`, the same source the
+   scheduler uses, and it **refuses to run** rather than guess when FPL reports no upcoming gameweek.
+2. **Wildcard/freehit silently dropped.** Those chips activate through the **transfer** endpoint, but the
+   submit path only called `make_transfers` when `decision.transfers` was non-empty, and `set_lineup` only
+   forwards `bboost`/`3xc`. So a wildcard decided with an empty transfer list was discarded while the run
+   still reported success. Now raises an explicit `FPLAuthError` instead of pretending the chip was played.
+3. **Duplicate `BotAgentError` import** inside one function (harmless, removed) — and the gameweek fix
+   needed it hoisted to the top of the function anyway, since it's now raised earlier.
+4. **`purchase_price` semantics undocumented**, which is what made it look wrong on review: for the
+   *incoming* player `now_cost` genuinely is correct (it's what you pay); only the *outgoing* side needs
+   the half-rise `selling_price`. Comment added so the next reader doesn't re-litigate it.
+
+Also confirmed correct and left alone: chip enum matches FPL's real names (`wildcard`/`freehit`/`bboost`/
+`3xc`, checked against `bootstrap-static`); early runs skip `set_lineup` entirely, so the placeholder
+captain the early prompt asks for can never reach FPL; `submit_decision` is excluded from `tools_used`;
+`make_transfer` stays filtered out of the agent's tool set.
+
+### Fixture-horizon audit — the agent was planning from the wrong gameweek
+Checked whether the bot actually reasons about *upcoming* gameweeks, not just which GW it writes to.
+Two separate problems, both real:
+
+**1. Every forward-planning tool anchored on `is_current` (off-by-one, mid-season).**
+`tool_get_fixtures`, `tool_analyze_fixtures` and `tool_chip_strategy` all built their window from
+`next((e['id'] for e in events if e.get('is_current')), 1)`. Mid-season that points at the gameweek whose
+matches are *being played* — so a requested 5-gameweek window returned GW6-GW10 while the bot was deciding
+GW7: the first slot is a gameweek nobody can transfer for, and the real forward view is only 4 deep.
+Pre-season the flag is absent entirely and the `, 1` fallback **hides the bug**, which is why the
+2026-08-21 run looked fine — GW1 is the one case where the fallback happens to equal the target.
+Fixed with a shared `planning_gameweek(events)` helper (`api_server.py`), which prefers `is_next`, then the
+first unfinished event, then `is_current`, then 1. Verified across four scenarios: pre-season → GW1,
+mid-season (GW6 current / GW7 next) → GW7, no-`is_next` → GW7, season-over → GW38 (degrades to the last
+gameweek rather than snapping back to GW1). Live check confirms `get_fixtures` now returns GW1-GW5 with
+Arsenal's real run (COV H, AVL A, CHE H, SUN A, BHA A).
+The other 11 `is_current` uses were left alone deliberately — they serve the chat and "current" is
+genuinely correct there. Only the three forward-planning tools were wrong.
+
+**2. The prompt never stated a planning horizon.** It said "check fixtures" but never how far ahead, and
+never distinguished which decisions are horizon-sensitive. Added an explicit section: captain/lineup are
+**this gameweek only** (they reset weekly — never captain for next week's fixture), transfers are judged
+over **3-5 gameweeks** (a transfer persists, so one good fixture followed by four hard ones is a bad buy),
+chips over the whole horizon. Also flagged the things that only surface when looking forward — blanks
+(no fixture = zero), doubles, fixture swings right after the target GW — plus an explicit warning that
+`get_ml_prediction` covers **one** gameweek and must never stand in for a fixture run. The task prompt now
+leads with `[TARGET GAMEWEEK] N — ... The fixture tools list GWN first`, so the horizon is unambiguous.
+
+### GW1 opening squad — built 2026-08-21, by hand-driving the tools (NOT the agent)
+Done deliberately without `bot_agent`: it is built to *adjust an existing squad* (transfers/captain/
+lineup) and `submit_decision` has no way to express an initial 15. Rather than bolt on a second agent
+path, the tools were driven directly — LP builder proposes, judgment layer reviews. Same division of
+labour the architecture calls for.
+
+**What the deterministic builder produced** (`/api/bot/initial-squad`): legal 3-5-2, exactly £100.0m,
+40.2 predicted points, C B.Fernandes / VC Cherki.
+
+**What the judgment layer changed, and why.** The builder put **two 75%-flagged players in the XI**
+(`START_MIN_CHANCE=1` allows it by design). Live news search on both:
+- **Doku (MCI, FPL 75%)** — withdrawn at half-time of the Community Shield with a re-aggravated calf;
+  Belgian press (Nieuwsblad) suggests **several weeks** out. This is the exact case in the handoff notes,
+  still live and still wrong in FPL's data.
+- **Šeško (MUN, FPL 75%)** — back in training but **zero pre-season minutes**; press consensus is a
+  fitness exclusion for GW1 with a ~Aug 30 return.
+Both replaced. Note the replacement shortlist itself needed filtering: **Bruno G. (75% thigh),
+Kroupi.Jr (0% foot) and Welbeck (75%)** all ranked well on ML but are flagged — ML ranks, it does not
+screen. Also MCI/MUN were already at the 3-club cap, so same-club swaps (Foden, Marmoush) were illegal.
+- Doku → **Rogers (CHE, £7.5m)** — price-neutral, ML 3.71, unflagged; CHE run FUL(A) BHA(H) ARS(A) HUL(H).
+- Šeško → **Woltemade (NEW, £6.0m)** — frees £1.0m, ML 3.21, unflagged, and NEW's GW5 HUL(2H) is soft.
+Final: **£99.0m, £1.0m in the bank**, 2/5/5/3, max 3 per club (LIV) — legality verified in code.
+
+**Deliberately NOT auto-submitted.** FPL publishes no endpoint for initial-squad creation (Task 5
+finding), so this is entered by hand. That is a platform gap, not an oversight.
+
+### Context for the NEXT session — RE-DERIVE, do not inherit
+Everything above was true at ~04:00 UTC on 2026-08-21, **before the GW1 deadline (17:30 UTC)**. Treat it
+as a starting hypothesis to test, not a conclusion:
+1. **Re-run the availability checks from scratch.** The news above is press-tier, not manager-tier. Friday/
+   Saturday pressers supersede it and may well upgrade Doku or Šeško. Re-check both, plus every flagged
+   player, before acting.
+2. **Prices and form will have moved.** The ML numbers above are pre-GW1 with zero real form data; after
+   GW1 the model has actual per-GW outcomes and its ranking should be expected to change materially.
+   Re-run `/api/predictions` rather than reusing these figures.
+3. **The fixture-horizon fix is still UNVERIFIED in production.** Pre-season `is_current` is empty, so the
+   old buggy `, 1` fallback and the new `planning_gameweek()` both return GW1 — the bug is invisible today.
+   **GW2 (deadline 2026-08-28T17:30Z) is the first run that can actually prove it.** Check that fixture
+   windows start at the *upcoming* gameweek, not the one in progress.
+4. **`BOT_TEAM_ID` still needs setting** once the team exists, or every squad-resolving endpoint 503s (by
+   design now, with an actionable message).
+5. **Writes remain impossible until a refresh token is present**; `FPL_BOT_MODE` defaults to `notify`.
+6. Whether the swaps above were *right* is measurable after GW1 — compare Rogers/Woltemade's actual returns
+   against Doku/Šeško's. Do that rather than assuming the judgment layer helped.
+
+## TASK 8 — Real FPL strategy in squad construction  ✅ (built and tested 2026-08-21)
+
+### Why the old squad builder was not doing strategy at all
+Traced after the user asked what the actual thought process behind the GW1 squad was. Three defects,
+each verified against the live API, all in `enhanced_optimization.py`:
+1. **The objective was `form`, and `form` is 0.0 for all 600 players pre-season** (measured:
+   `nonzero form = 0`). `_calculate_fixture_scores` does `base_score = float(player['form'])` then
+   `max(score, 0.01)` — so **every player scored exactly 0.01 and the objective was FLAT**. The LP was
+   not optimising; it was returning an arbitrary feasible squad. That is the state it was in for the
+   opening squad, the one that matters most.
+2. **The ML model was never in the objective** — `grep -c "ml_predict\|predicted_points"` on that file
+   returns **0**. The `predicted_points` shown per pick were computed *after* selection, as display
+   annotations. The verified +1.52 pts/pick model had zero influence on who was picked.
+3. **The bench was unscored while money was force-spent into it.** The objective summed only
+   `starting[...]`, so bench players were worth nothing, yet `target_spend=budget` imposes
+   `total_cost >= 100.0`. The unscored bench was the only place the forced money could go — which is
+   exactly how the first squad ended up with Steele (1% to start), Elvedi (10%), Mheuka (3%), Thomas (2%)
+   on the bench: **unusable cover**, since a substitute who never plays cannot cover anything.
+
+### The strategy, researched not invented
+Sources: [RotoWire — FPL GW1 2026/27 opening-squad guide](https://www.rotowire.com/soccer/article/best-fpl-gameweek-1-tips-2026-27-how-to-build-the-perfect-opening-squad-127299)
+and [Fantasy Football Fix — Best FPL Rotation Strategies 2026/27](https://www.fantasyfootballfix.com/blog-index/best-fpl-rotation-strategies-2026-27/).
+Encoded principles:
+- **Spend on the pitch, not the bench** — "little value in spending an extra £1.0m on a bench player if
+  that money could upgrade someone you expect to start every Gameweek." So bench spend is **capped**,
+  never funded by a forced total spend.
+- **The bench must still PLAY** — the first sub especially. Cheap is necessary but not sufficient;
+  `BENCH_MIN_START_PROB` makes playing probability a hard filter, which is what turns bench fodder into
+  real rotation cover for an injury or a brutal fixture.
+- **Rotation pairs with COMPLEMENTARY fixtures** — two budget defenders (£4.0-5.0m) from different clubs
+  whose good fixtures fall in *different* gameweeks, so one always has a favourable game. Scored by
+  window coverage minus overlap (two teams with identical good weeks are the same bet twice, not a pair).
+- **Clean sheets need BOTH a soft run and a real defence** — `clean_sheet_outlook` multiplies fixture
+  softness by FPL's own `strength_defence_home/away` ratings (normalised to league average 1.0), with a
+  small home-share bump. A good defender with a hard fixture is unlikely to keep a clean sheet, which is
+  precisely when his rotation partner should start.
+- **Minutes certainty above all**, and **keep flexibility** (`min_bank` supports holding cash).
+
+### Value and underlying numbers (user addition)
+`value_and_underlying()` reads the Understat fields `enhanced_features.py` was already collecting and
+**nothing in the selection path was using** — collecting xG then picking on `form` left the most
+predictive data on the floor. Points-per-£m plus an xG verdict, deliberately signed the right way:
+**overperformance is a REGRESSION WARNING, not a buy signal** (the banked goals do not repeat unless the
+xG supports them), while **underperformance on high xG+xA/90 is the genuine bargain**. Live output is
+informative rather than decorative: flags Semenyo (+4.2 above xG), Gibbs-White (+3.3) and Cunha (+2.9)
+as regression risks — Gibbs-White **while the LP has him in the XI** — and Haaland (-1.8 on 1.04
+xG+xA/90), Saka (-1.7) and B.Fernandes (-2.9 on 0.87) as underperforming bargains.
+
+### What shipped
+- **`fpl_strategy.py`** — fixture runs, clean-sheet outlook, rotation-pair finder, value/xG analysis, and
+  a role-tagged shortlist (premium/core/value/rotation/bench).
+- **`EnhancedOptimizer.optimize_from_shortlist`** — objective is **v2 predicted points**; the bench is
+  scored at `BENCH_WEIGHT = 0.25` (real via rotation and auto-subs, but not worth paying up for); bench
+  spend is **capped**; budget is **not** force-spent; `min_bank` supported.
+- **`GET /api/strategy/squad`** — two-stage: strategy shortlists, LP assembles. **Refuses (503) if the v2
+  model is unavailable** rather than silently reverting to the flat `form` objective.
+
+### Measured before/after (same £100m, same GW1)
+| | old builder | strategy builder |
+|---|---|---|
+| objective | `form` → flat 0.01 for all | v2 predicted points |
+| bench | Steele 1%, Elvedi 10%, Mheuka 3%, Thomas 2% | Dubravka 92%, Kostoulas 93%, Hume 92%, Davies 88% |
+| spend split | £100.0m forced, bench unconstrained | XI £81.5m + bench £18.0m, £0.5m banked |
+Rotation pairs found (Diop IPS / O'Nien SUN, £8.0m, covers GW1-5), top clean-sheet teams ranked
+(LIV 0.588, LEE/TOT/MCI 0.561), 8 value picks, 8 xG bargains, 8 regression risks.
+
+### Bug found and fixed during testing (worth recording)
+First run returned **`Infeasible`**. Cause: ranking the shortlist by predicted points alone **drops the
+entire £4.0m tier** — a £4.0m defender never outscores a £6.0m one — so the cheapest possible bench cost
+came to *exactly* `BENCH_SPEND_CAP` (£18.0m), leaving zero slack. Real £4.0m starters do exist (Dubravka
+0.93, Davies 0.88, Diop 0.87); they were being cut before the LP ever saw them. Fixed by guaranteeing a
+cheapest-playing retention block per position, and by setting `value_bar` to each position's **actual**
+cheapest tier (verified: **no MID or FWD exists below £5.0m** in 2026/27, so a £4.5m bar left those
+positions with no budget role at all). Min bench cost is now £16.0m against an £18.0m cap.
+
+### BACKTEST — strategy WINS once the harness is correct (measured, 2026-08-21)
+`strategy_backtest.py`, run on real 2025/26 per-GW outcomes (vaastav export, 841 players). Two harness
+bugs had to be fixed before the numbers meant anything — recording both, because the first run said the
+strategy LOST and that conclusion was an artefact.
+
+**Harness bug 1: the objective was tested with a proxy, not the real model.** The first version used
+prior points-per-90 because the export supposedly couldn't rebuild the v2 feature vector. That was wrong:
+`ml_predict_v2._row_from_history` needs BASE_COLS (total_points, minutes, bps, ict_index, influence,
+creativity, threat) plus `round`, and vaastav's export has **all seven**. Feeding the real model its own
+features moved the result from **mean −8.3** to **mean +18.2**.
+
+**Harness bug 2 (the big one): auto-sub scoring rewarded an absurd bench.** The scoring rule credited the
+BEST bench scores whenever any starter blanked. At GW1 the old form builder benched **Salah (£14.5m) and
+Haaland (£14.0m)** — a nonsense squad — and collected **190 "auto-sub" points**, beating a squad whose XI
+scored 73 MORE. Real FPL: a starter is only replaced on **0 minutes**, subs come on in strict **bench
+order** (not best-first), each sub is used once, and the formation must stay legal. Implemented properly
+(`_mins`, `_formation_legal`); GW1 flipped from **−84 to +33**.
+
+**Harness bug 3: bench ordering was unfair to the form builder.** `score_squad` ordered substitutes by
+`b.get("predicted_points", b.get("form", 0))` — but `build_form_squad` rows carry NO `predicted_points`
+key, so the strategy squad was ordered by model predictions while the form squad fell back to form. That
+flattered the strategy builder for a reason unrelated to selection. Now ordered by **price descending**,
+the one signal both builders share (and FPL bench order is the manager's choice anyway). Also removed a
+dead nested `played()` function left over from the rewrite and an unused `Tuple` import.
+
+**Final measured result (all three harness bugs fixed) — strategy wins 5/6 build points, mean +38.2 pts:**
+| build GW | form | strategy | diff |
+|---|---|---|---|
+| GW1  | 240 | **273** | +33 |
+| GW5  | 494 | **501** | +7 |
+| GW12 | **423** | 403 | −20 |
+| GW20 | 415 | **528** | +113 |
+| GW26 | 447 | **504** | +57 |
+| GW32 | 368 | **407** | +39 |
+
+**GW12 investigated, and it is NOT a bug.** The strategy XI's players actually out-scored the form XI's
+over the rest of the season (1156 vs 1066); the loss comes from the XI/bench split. Elliot Anderson
+(£5.3m) went to the bench and then scored 139, but his predicted 2.73 was genuinely below the benched-out
+alternative (Anthony 2.82) — the LP split the squad rationally on the information it had. That is
+prediction noise, not a modelling error, and "fixing" it would mean overfitting to one known outcome.
+
+**Superseded table (before the bench-order fix):**
+| build GW | form (old) | strategy (new) | diff |
+|---|---|---|---|
+| GW1  | 240 | **273** | +33 |
+| GW5  | 494 | **501** | +7 |
+| GW12 | **430** | 403 | −27 |
+| GW20 | 415 | **528** | +113 |
+| GW26 | 444 | **504** | +60 |
+
+Robust across horizons (not a single-window fluke): **5 GWs → 3/4 wins, mean +30.0**; **15 GWs → 3/4 wins,
+mean +76.8**. GW12 is the consistent loss across every configuration and is worth investigating rather
+than dismissing.
+
+### Earlier (superseded) reading of the same test
+
+Built `strategy_backtest.py` and ran it on real 2025/26 per-GW outcomes (vaastav export, 841 players)
+before wiring anything into the agent. **Result: the full strategy builder LOST — 1 win in 3 build
+points, mean −8.3 pts over 10-gameweek windows.** Recorded as-is; the change is not vindicated.
+
+Decomposing the two changes separately is what made it informative:
+
+| build GW | old (form obj + old structure) | **form obj + NEW structure** | proxy obj + new structure |
+|---|---|---|---|
+| GW5  | 503 | 494 | 491 |
+| GW12 | 462 | **484** | 495 |
+| GW20 | 424 | **443** | 378 |
+
+- **The STRUCTURAL fix is the part that works: 2 wins / 3, mean +10 pts.** Bench spend fell from
+  £20-25m to ~£18m and bench MINUTES roughly doubled (2,800→5,201 at GW20; 3,796→9,028 at GW5) — the
+  bench became real rotation cover rather than dead weight, which is exactly the intent.
+- **The OBJECTIVE substitution is what loses.** The backtest's per-90 proxy picked players with good
+  historical rates who then barely featured — Isak (41 pts over the window) and Malen (**2**) both
+  entered the XI. Form, for all its faults, at least tracks who is currently playing.
+
+**Important caveat on what this does and does not test.** The proxy is NOT the v2 model — the historical
+export cannot reconstruct its 32-feature vector, so `proxy_predicted_points` uses prior points-per-90.
+So this measures "structure + a weak predictor", and the objective result says nothing about the real
+model. It does say the structure earns its place on its own.
+
+**The GW1 case is the most telling, and favours the new structure emphatically.** At GW1 the old builder
+produced: bench **£41.0m**, XI blank rate **58.2%**, and an XI scoring **174** against **190 from
+auto-subs** — the bench outscored the starters. That is the flat-objective failure this task diagnosed,
+confirmed on real data. (The strategy builder went infeasible at GW1 in the *harness only*: this export
+has no prior-season minutes, so the proxy `start_probability` maxes at 0.35 and nothing clears the 0.55
+bench filter. Live, the v2 model supplies real start probabilities of 0.88-0.93 — verified — so this is a
+harness limitation, not a shipped defect. Worth fixing in the harness before drawing GW1 conclusions.)
+
+**Decision (superseded by the corrected run above):** at the time, keep the structure and treat the
+objective as unproven. The corrected harness then measured the objective change as a WIN with the real
+model, so both halves now have evidence. The lesson worth keeping: the first run's negative verdict came
+from the test, not the code — check the harness before believing a surprising result.
+
+### Season hygiene: live picks are 2026/27 only (user caught this)
+The Salah/Haaland bench example above comes from `strategy_backtest.py`, which reads
+`cache/backtest/merged_gw_2025_26.csv` — **last** season. That is correct for a backtest (you can only
+score against outcomes that already happened, and 2026/27 has zero played gameweeks), but it must never
+leak into live picks: **Salah is not in the 2026/27 game at all** (verified against bootstrap-static).
+Confirmed by grep that the live path (`api_server`, `fpl_strategy`, `bot_agent`) never reads the backtest
+cache — it is bootstrap-static only. Live squad re-verified: **all 15 picks exist in the 2026/27
+bootstrap**, £99.5m, XI £81.5m + bench £18.0m, £0.5m banked.
+
+### MCP parity for Claude Desktop  ✅ (2026-08-21)
+Audited `Server.py` (MCP) against `api_server.FPL_TOOLS` (chat/REST). Most apparent gaps were just name
+differences (`analyze_fixtures` vs `analyze_team_fixtures`, `get_top_performers` vs `get_top_players`,
+`optimize_squad_lp` vs `optimize_squad`), but **the two most valuable NEW tools were genuinely absent** —
+`get_squad_strategy` and `search_player_news` — and neither `fpl_strategy` nor `player_news_search` was
+imported. MCP is now **17 tools**, both added with the descriptions written for Claude Desktop's
+tool-picking (concrete "Use for:" examples, and an explicit warning that search_player_news is slow).
+
+**Two real bugs caught by checking signatures instead of assuming them** — both would have failed at
+runtime inside Claude Desktop:
+1. `fetch_knocks_and_bans` / `fetch_ffscout_team_news` are **async and take an aiohttp session**. Calling
+   them bare returned un-awaited coroutines, so the cross-reference would silently have had no
+   third-party data. Fixed to the same `async with aiohttp.ClientSession()` + `asyncio.gather` pattern
+   `get_team_news` already used. Verified live: 91 Knocks-and-Bans entries, 20 FFScout teams.
+2. `collect_enhanced_data` returns a **(players, match_stats) tuple**, not a list. Treating it as a list
+   of players would have yielded garbage xG data. Now unpacked.
+
+Also added `planning_gameweek()` to `Server.py`, mirroring the api_server fix — MCP had the same
+`is_current` off-by-one in 8 places. The new strategy tool uses it; the pre-existing tools still use
+`is_current` and should be migrated (listed as a gap below).
+
+**Verified via the real MCP handler** (`handle_call_tool`), not just imports: `get_squad_strategy`
+returns the full 2,629-char analysis; `search_player_news` reaches the search layer and degrades
+gracefully to an actionable message when no API key/credit is present.
+
+### Task 7 items done (FBRef waste)
+- **Negative-cache TTL 1h → 12h** (`FBREF_FAILURE_TTL_HOURS`). A retry costs ~11 minutes (5 stat types x
+  2-3 attempts x 40s marker timeout) and **cannot succeed before a season's first matches** — there is no
+  table to serve. The hourly retry was pure waste and repeatedly stalled interactive tool calls, including
+  three times while testing today.
+- **Error message now distinguishes blocked from absent.** It inspects the retained page text for
+  Cloudflare fingerprints (`cf-mitigated`, `just a moment`, `challenge-platform`, …) and says either
+  "challenge did not clear — retrying may help" or "the page loaded but contains no `stats_<type>` table
+  — most likely no published data yet; retrying will NOT help". Conflating these is exactly what produced
+  the wrong diagnosis this ROADMAP carried for weeks.
+
+### MCP `optimize_squad_lp` was still on the broken objective — found by Claude Desktop
+The very first real Claude Desktop session called `optimize_squad_lp` and refused to use the result:
+"The LP optimizer is spitting out nonsense (Haaland and Isak on the bench, 0.0 expected points). I'll
+build this myself." **It was right.** Reproduced exactly: a **£39.5m bench** holding Haaland (£15.5m),
+Isak (£9.0m) and Palmer (£9.5m), while STARTING a £4.0m defender projected at 0.2 pts/gw, with
+"Expected Points: 0.0".
+
+Cause: Task 8 fixed the objective in `api_server` (`/api/strategy/squad`) but `Server.py`'s MCP handler
+still called the old `optimize_squad_with_fixtures` with `target_spend=100.0`. All three original defects
+were therefore live on the MCP path: flat `form` objective (0.0 for all 600 pre-season), bench excluded
+from the objective, and the full budget force-spent — so premiums landed on the unscored bench because it
+was the only place the forced money could go.
+
+Fixed: the handler now builds via `fpl_strategy.build_shortlist` +
+`EnhancedOptimizer.optimize_from_shortlist`, uses `planning_gameweek`, and **refuses** (rather than
+silently falling back to `form`) if the v2 model is unavailable. Output rewritten to report the real
+objective — XI/bench cost split, per-pick predicted points and start probability, xG flags, rotation
+pairs, and an explicit reminder to check press conferences.
+
+Verified via the MCP handler: **£100.0m = XI £83.0m + bench £17.0m**, bench picks 79-92% to start,
+predicted XI points 40.5. Compare the old output above.
+
+**Lesson worth keeping: fixing a shared bug in one entry point does not fix the others.** The same class
+of miss as the bot brain (Task 6) and the flat objective (Task 8) — a verified fix wired to one consumer
+only. When fixing an objective/model path, grep for every caller.
+
+## TASK 9 — Real automation via headless Claude Code  ✅ (built and tested 2026-08-22)
+
+### The finding that unlocked it
+`claude --print --mcp-config ...` loads the **local** MCP server and can call all 17 tools headlessly.
+Verified on this machine — and it worked while the project's `ANTHROPIC_API_KEY` had **zero credit**, so
+it authenticated through the Claude Code subscription session rather than the API key. That is the whole
+cost argument for this approach over the API path.
+
+Ruled out (researched, not assumed): **plugins cannot schedule anything** (they are skills/agents/hooks/
+MCP configs); **cloud Routines and Cowork tasks cannot reach a local MCP server** (Anthropic-hosted
+connectors only); **Desktop scheduled tasks** only fire while the app is open; **`/loop`** expires after
+7 days and needs a live session.
+
+### What shipped
+- **`run_bot.sh`** — launchd entry point. Ticks hourly, asks `bot_scheduler.due_runs()` whether anything
+  is actually due, and only then invokes Claude. Measured: a not-due tick costs **0.9s** and invokes no
+  model at all, so hourly polling is effectively free while staying robust to FPL moving a deadline
+  (hardcoded cron times rot; FPL's own published deadlines do not).
+  Writes each decision to `logs/decision_<ts>_<type>.md`, records the run so it is not repeated, fires a
+  macOS notification, and on failure does **not** record the run so it retries.
+- **`mcp_bot.json`** — MCP config for the headless runs.
+- **`com.clankerfc.fplbot.plist`** — launchd job (`plutil -lint` clean). Sets PATH/CLAUDE_BIN explicitly
+  because launchd's minimal environment does not include nvm. `RunAtLoad` is on so a machine that was
+  asleep through a window can still catch it inside `due_runs()`'s grace period.
+
+### Safety
+The agent gets an explicit **read-only** `--allowedTools` allowlist. Even a badly-worded prompt cannot
+submit a transfer, and if a write tool is ever added to the MCP server it cannot silently become
+reachable from cron. Writes stay behind `fpl_auth`'s `FPL_BOT_MODE` (default `notify`).
+
+### End-to-end test (real, not simulated)
+`./run_bot.sh --force final` → **SUCCESS in 792s, 4,536-byte briefing**. The output is genuine FPL
+reasoning, not a stats dump: captained Haaland on fixture, flagged that **Saka is absent from Arsenal's
+predicted XI despite carrying no FPL flag** (~71% to start) and said don't captain him, told the reader
+to **own Isak but not captain him** (new club + away at his former club, the best CS defence in the
+league), correctly applied the auto-sub rule to 75% doubts, dismissed the GW1 form table as
+promoted-side clean-sheet luck, and noticed that **Newcastle and Liverpool — the two best clean-sheet
+outlooks — play each other this week**, so neither is a GW2 CS play. It also flagged its own limitation:
+live web search was unavailable, so it told the reader to hand-check Saka.
+
+### The fixture-horizon fix is NOW VERIFIED (it could not be, until today)
+GW1 has been played: `is_current=1`, `is_next=2`. So for the first time the buggy and fixed code diverge:
+| | result |
+|---|---|
+| OLD `is_current` anchor | **GW1** — already being played |
+| NEW `planning_gameweek()` | **GW2** — the one being decided |
+Confirmed correct against live data. Previously this was unprovable, since pre-season both returned GW1.
+
+### Caveats to carry forward
+- **A run takes ~13 minutes.** Fine against a deadline hours away, but the launchd window must allow it.
+- **launchd does not run while the Mac is off**, and a sleeping Mac only runs it on wake. For reliable
+  deadline coverage schedule a wake: `sudo pmset repeat wakeorpoweron MTWRFSU 13:00:00`. Until then this
+  is best-effort — another reason the tools are read-only and the mode is `notify`.
+- **Billing is unconfirmed.** The run succeeded with zero API credit, implying subscription auth, but
+  there are reports that headless runs may bill at API rates. **Check the usage dashboard after the first
+  few real runs** rather than assuming either way.
+
+### launchd install — TCC blocker found and solved (2026-08-25)
+`launchctl load` succeeded but the job exited **126** immediately:
+`/bin/bash: .../run_bot.sh: Operation not permitted` — despite the script being `-rwxr-xr-x`. Cause is
+**macOS TCC**, not Unix permissions: launchd-spawned processes cannot read `~/Documents` at all.
+Rejected granting `/bin/bash` Full Disk Access (that hands EVERY bash script on the machine full disk
+access — far too broad for one bot). Instead `run_bot.sh` + `mcp_bot.json` are copied to
+**`~/.clankerfc/`** (not TCC-protected) with logs alongside; the repo keeps the canonical copies under
+version control. **Re-copy after editing** — the plist header documents this so nobody "helpfully" points
+it back at the repo. Job now loads clean (**exit 0**, empty stderr) and the hourly tick works from the
+new location.
+
+### Second end-to-end run (early type) — passed
+`./run_bot.sh --force early` → SUCCESS, 2,468-byte report. It did exactly what an early run should: told
+the difference between a **price trap** and a **timing play**. Flagged De Cuyper (top of form AND
+transfers-in at +328k, so a rise was locked in) as **do NOT chase** — one goal from ~0.5 xG is finishing
+luck, and Brighton face Chelsea then Arsenal; but flagged João Pedro as the genuine early move on **xG
+3.0**, real underlying threat rather than a spike. Recommended rolling otherwise. It also declared its
+own blind spots (news tools offline, no API key).
+
+### 2026/27 advanced stats went LIVE (and two predictions came true)
+GW1 has been played, and both sources now return real current-season data: **Understat 310 players,
+FBRef 310 players** for 2026/27 (Haaland xG 0.75 from 5 shots — real, not the placeholder the bot
+complained about pre-GW1). This retires the long-running fallback-to-2025/26 caveat.
+Both Task 7 predictions are confirmed:
+1. **The wall was never permanent** — 4 of 5 FBRef stat types now fetch cleanly through the same code.
+2. **The new error message did its job** — `goal_shot_creation` failed with *"the page loaded but
+   contains no table — most likely this season has no published data yet ... Retrying will NOT help"*,
+   correctly distinguishing "not published" from "Cloudflare blocked us". Under the old message this
+   would have been misfiled as an anti-bot block again.
+
+### Known remaining gaps (do not assume these are done)
+- The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
+  `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and
+  start_prob, not the role label) but the tags are misleading and should be tightened.
+- **`form` still has no weight once real gameweeks exist.** The user's steer was that ML leads but form
+  should carry weight after some games have been played. The v2 model already ingests rolling form as a
+  feature, so this may need nothing — but it is **unverified**, and worth an explicit blend test once GW3-4
+  data exists rather than assuming the feature covers it.
+- ✅ **DONE — the agent now reads the strategy.** `get_squad_strategy` is registered as the 19th tool
+  (dispatcher + `tool_squad_strategy`), returning clean-sheet rankings, rotation pairs, value picks, xG
+  bargains and regression risks as prose to reason over — deliberately NOT a squad to copy, since handing
+  the agent a finished squad would replace the judgment the tool exists to inform. `SYSTEM_PROMPT` now
+  teaches the four principles (clean sheets need soft run AND real defence; rotation pairs cover a run
+  cheaply; overperforming xG is a WARNING not a buy signal; spend on the pitch but the bench must PLAY),
+  and the parallel-call step includes it. Verified live: it flagged **Rogers +2.9 above xG as a regression
+  risk — a player the earlier hand-built squad had bought**, which is exactly the check that was missing.
+- The **two-agent debate** is still not built; it should own the judgment layer over this analysis.
+- Whether this squad **actually scores better** is unmeasured. `ml_backtest.py` can build a squad on a past
+  season's GW1 data and score it against real outcomes vs the form-based version. Do that before trusting
+  the improvement.
+
+---
+
+### Remaining in Task 6
+- ⬜ **Two-agent debate** (proposer + challenger). Deliberately sequenced *after* the single loop: its
+  value is unmeasured, whereas the wiring gap above was a known deficit with an already-measured fix.
+  Build it, then measure whether the challenger ever *flips* a verdict — if it never does, it's cost with
+  no signal and that's worth knowing.
+- ⬜ **Real-squad end-to-end run** once GW1 is played and picks exist.
+- ⬜ Notify channel on failure/low-confidence (currently recorded in `cache/bot_runs.json` and the
+  workflow's step summary only).
+
+---
+
+## TASK 7 (proposed) — FBRef: stop paying for pages that cannot exist yet  ⬜
+**The ROADMAP's own diagnosis of this was wrong; corrected by direct testing 2026-08-21.**
+- It is **not** a consent banner. Response headers are `cf-mitigated: challenge`, `server: cloudflare` —
+  a Cloudflare bot challenge.
+- Plain HTTP now 403s on the **entire domain**, `fbref.com/en/` included. So the earlier theory
+  ("freshly-published, low-traffic early-season pages are more aggressively protected") does not hold.
+- **Selenium still clears the challenge**: 551 rows of 2025/26 `standard` fetched fresh with
+  `no_cache=True, no_store=True` in 172s.
+- Decisively: 2026/27 via Selenium fails with `ValueError: not enough values to unpack (expected 1, got 0)`
+  — **not** a 403 and not a challenge. That is the parser finding no table, through the identical code
+  path that works for 2025/26.
+
+**Conclusion: there is nothing to "fix". The 2026/27 pages have no player-stats tables yet** because no
+matches have been played. `_fetch_extended_player_stats` reports a table-not-found as an
+"anti-bot interstitial", which is what produced the wrong diagnosis above.
+
+**Selenium is permanent and that is fine.** `sd.FBref` subclasses `BaseSeleniumReader` with **no requests
+backend anywhere in its MRO** (verified) — there is no non-Selenium path to switch to, and since plain
+HTTP 403s the whole domain, Selenium is precisely what clears Cloudflare. It is not a workaround to be
+removed.
+
+**The ~11 min is failure cost, not Selenium cost — so it mostly disappears once the tables exist.**
+`_wait_for_table_html` polls up to **40s** for a table marker; when the table does not exist every attempt
+burns the full timeout, and 5 stat types × 2-3 attempts ≈ the measured 11 min. When the table *does*
+exist the marker appears in seconds. Measured on 2025/26 through the identical path:
+| | now (no 2026/27 tables) | once tables exist |
+|---|---|---|
+| Cold / cache expired | ~11 min (all timeouts) | ~2-3 min (browser start + soccerdata's fixed 7s/request rate limit) |
+| Warm cache | ~0.5s | ~0.5s |
+The bot runs twice a gameweek and the cache holds between runs, so the warm path is the common case; the
+17-min run measured on 2026-08-21 was near worst-case.
+
+Still worth doing (smaller than first framed — the wasted-time half self-resolves):
+- Distinguish "Cloudflare blocked us" from "page has no table" in the error message. This is the item that
+  actually matters: conflating them is what produced the wrong diagnosis above.
+- Optionally extend the negative cache beyond 1h *while a season is unplayed*.
+
+**Caveat, do not over-promise:** `_fetch_extended_player_stats` is hand-rolled scraping outside the
+maintained library (see Task 1 item 2), and `goal_shot_creation` was the flakiest stat type even on
+2025/26. Expect "much faster, occasionally one stat type empty", not "perfectly clean".
+Also re-confirmed live: `stat_type="defense"` still raises `TypeError ... should be in ['standard',
+'keeper', 'shooting', 'playing_time', 'misc']` — the soccerdata whitelist regression is unchanged, which
+is why the hand-rolled fetch is load-bearing rather than optional.
+
+**Timing note (measured, for expectation-setting):** the 2026-08-21 agent run took ~17 min total —
+~11 min of it FBRef retries in `fetch_enhanced_players()`, only ~6.5 min of actual agent deliberation
+(9 iterations, 16 tool calls, 2 web searches). On a warm cache a full decision is ~6-7 min. **The chat
+does not pay this**: its FBRef data is cached and a normal turn is 1-3 tool calls, so it stays in seconds.
 
 ---
 

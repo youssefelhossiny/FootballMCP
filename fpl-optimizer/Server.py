@@ -71,7 +71,7 @@ except ImportError:
 # Now import everything else
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 import httpx
 import aiohttp
 from mcp.server.models import InitializationOptions
@@ -124,6 +124,33 @@ fixture_analyzer = FixtureAnalyzer()
 chips_analyzer = ChipsStrategyAnalyzer()
 availability_filter = AvailabilityFilter()
 enhanced_collector = EnhancedDataCollector(cache_ttl_hours=6)
+
+# Squad-construction strategy (clean-sheet outlook, rotation pairs, value, xG).
+import fpl_strategy
+from player_news_search import search_player_news as _search_player_news
+
+# Selection bar for strategy analysis, mirroring api_server.SQUAD_MIN_CHANCE.
+SQUAD_MIN_CHANCE = int(os.getenv("SQUAD_MIN_CHANCE", "50"))
+
+
+def planning_gameweek(events: List[Dict]) -> int:
+    """
+    The gameweek forward-looking advice should START from — the next unplayed
+    one, not the one in progress.
+
+    `is_current` is the wrong anchor for planning: mid-season it points at the
+    gameweek being played, so a 5-gameweek window leads with a gameweek nobody
+    can still transfer for. Before a season's first deadline it is absent
+    entirely and a `, 1` fallback hides the bug (GW1 is the one case where the
+    fallback happens to equal the target). Mirrors api_server.planning_gameweek.
+    """
+    gw = next((e["id"] for e in events if e.get("is_next")), None)
+    if gw is not None:
+        return gw
+    gw = next((e["id"] for e in events if not e.get("finished")), None)
+    if gw is not None:
+        return gw
+    return next((e["id"] for e in events if e.get("is_current")), 1)
 
 
 class _PointsPredictorV2:
@@ -666,6 +693,63 @@ async def handle_list_tools() -> list[types.Tool]:
                         "default": None
                     }
                 }
+            }
+        ),
+        types.Tool(
+            name="get_squad_strategy",
+            description=(
+                "Get FPL squad-construction STRATEGY analysis for the upcoming gameweeks. Returns: "
+                "which teams are best placed to keep CLEAN SHEETS (fixture softness combined with "
+                "FPL's own defensive-strength ratings); budget-defender ROTATION PAIRS whose good "
+                "fixtures fall in DIFFERENT gameweeks, so one of the pair always has a favourable "
+                "game; best VALUE by points-per-million among players who actually start; xG "
+                "BARGAINS (scoring BELOW expected goals on high underlying threat — the chances are "
+                "there and finishing tends to correct); and REGRESSION RISKS (scoring ABOVE xG, so "
+                "the price is inflated by finishing luck that will not repeat). "
+                "Use this when planning transfers, a wildcard, or an opening squad, and to judge "
+                "whether a player is genuinely good value rather than merely in form. "
+                "This is strategic context to reason WITH, not a squad to copy. "
+                "Use for: 'Who should I target for clean sheets?', 'Is X good value?', "
+                "'Which cheap defenders rotate well?', 'Is X's form sustainable?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_gameweeks": {
+                        "type": "integer",
+                        "description": (
+                            "How many gameweeks ahead to analyse (default 5, max 10). Transfers "
+                            "should be judged over 3-5 gameweeks, not just the next one."
+                        ),
+                        "default": 5
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="search_player_news",
+            description=(
+                "Search the LIVE WEB for the latest injury/availability news on specific players, "
+                "and cross-reference it against FPL's own flag, Knocks and Bans, and Fantasy "
+                "Football Scout. Use this whenever a player shows a PARTIAL doubt (25/50/75%) or the "
+                "structured sources disagree — those flags are coarse and hand-updated, so they go "
+                "stale. Real example: FPL listed a player at 75% while the press had him out for "
+                "weeks after a match withdrawal. "
+                "SLOWER than the other tools (it runs real web searches), so use it for the handful "
+                "of players you are actually deciding on, not for browsing. "
+                "Use for: 'Is X really injured?', 'Will X play — the sources disagree?', "
+                "'What's the latest on X?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "player_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Players to check, e.g. ['Doku', 'Saka']. Max 6."
+                    }
+                },
+                "required": ["player_names"]
             }
         )
     ]
@@ -1224,32 +1308,68 @@ async def handle_call_tool(
                 logger.warning("Could not fetch fixtures, using basic optimization")
                 fixtures_data = []
 
-            players = bootstrap.get('elements', [])
+            all_players = bootstrap.get('elements', [])
             teams_data = {team['id']: team for team in bootstrap.get('teams', [])}
             events = bootstrap.get('events', [])
-            current_gw = next((e['id'] for e in events if e.get('is_current')), 1)
-
-            # Enhance players with xG/xA data for better predictions
-            players, match_stats = enhance_players_with_understat(players)
-            logger.info(f"📊 Enhanced {len(players)} players with Understat data ({match_stats.get('match_rate', 0):.1f}% matched)")
+            # Plan from the NEXT unplayed gameweek, not the one in progress.
+            current_gw = planning_gameweek(events)
 
             budget = arguments.get('budget', 100.0)
-            optimize_for = arguments.get('optimize_for', 'fixtures')
-            target_spend = arguments.get('target_spend', 100.0)  # Use maximum budget
-            num_gws = arguments.get('num_gameweeks', 5)
+            num_gws = min(max(int(arguments.get('num_gameweeks', 5) or 5), 1), 10)
 
-            logger.info(f"📊 Using enhanced optimizer: budget=£{budget}m, target=£{target_spend}m, strategy={optimize_for}, GWs={num_gws}")
+            # STRATEGY-DRIVEN BUILD (replaces optimize_squad_with_fixtures).
+            #
+            # The old path produced provably nonsensical squads and it was Claude
+            # Desktop that surfaced it: a £39.5m bench holding Haaland (£15.5m),
+            # Isak (£9.0m) and Palmer (£9.5m) while STARTING a £4.0m defender
+            # projected at 0.2 pts/gw, and "Expected Points: 0.0". Three causes,
+            # all fixed by switching to optimize_from_shortlist:
+            #   1. the objective was `form`, which is 0.0 for every player
+            #      pre-season -> max(0*fdr, 0.01) == 0.01 for all 600, i.e. a
+            #      FLAT objective returning an arbitrary feasible squad;
+            #   2. the objective summed only the starting 11, so bench players
+            #      were worth nothing to it;
+            #   3. `target_spend=100.0` forced the full budget to be spent, and
+            #      the unscored bench was the only place left to put it — hence
+            #      premiums on the bench.
+            # The replacement maximises v2-model predicted points, scores the
+            # bench at a discount, CAPS bench spend, and does not force-spend.
+            available = availability_filter.filter_available_players(
+                all_players, min_chance=SQUAD_MIN_CHANCE
+            )
 
-            # Use Enhanced Optimizer
-            squad, lineup_info, status = enhanced_optimizer.optimize_squad_with_fixtures(
-                players=players,
-                fixtures=fixtures_data,
-                teams=teams_data,
-                current_gw=current_gw,
-                budget=budget,
-                optimize_for=optimize_for,
-                target_spend=target_spend,
-                num_gws=num_gws
+            preds_raw = ml_predict_v2.predict_points(available)
+            if not preds_raw:
+                return [types.TextContent(type="text", text=(
+                    "❌ Squad optimization needs the points model, which isn't available on "
+                    "this deployment. Refusing to fall back to the old form-based objective, "
+                    "which returns an arbitrary squad before a season starts."
+                ))]
+            predictions = {
+                pid: {"predicted_points": v.get("predicted_points", 0.0),
+                      "start_prob": v.get("play_probability", 0.0)}
+                for pid, v in preds_raw.items()
+            }
+
+            runs = fpl_strategy.build_fixture_runs(fixtures_data, teams_data, current_gw, num_gws)
+            shortlist, meta = fpl_strategy.build_shortlist(
+                available, teams_data, runs, predictions
+            )
+            if len(shortlist) < 15:
+                return [types.TextContent(type="text", text="❌ Not enough available players to build a squad.")]
+
+            lp_rows = [{
+                "id": t.player_id, "name": t.name, "price": t.price,
+                "position_id": t.position, "team_id": t.team, "team": t.team_short,
+                "predicted_points": t.predicted_points, "start_prob": t.start_prob,
+                "role": t.role, "points_per_million": t.points_per_million,
+                "xg_signal": t.xg_signal, "good_fixture_gws": t.good_fixture_gws,
+            } for t in shortlist]
+
+            squad, lineup_info, status = enhanced_optimizer.optimize_from_shortlist(
+                lp_rows, budget=budget,
+                bench_spend_cap=fpl_strategy.BENCH_SPEND_CAP,
+                min_bank=0.0,
             )
 
             if not squad:
@@ -1257,40 +1377,63 @@ async def handle_call_tool(
 
             logger.info(f"✅ Squad optimized: {len(squad)} players, cost=£{lineup_info['total_cost']:.1f}m")
 
-            # Format results
+            # Format results. Keys come from optimize_from_shortlist, whose rows
+            # are already strategy-tagged, so no re-prediction is needed here —
+            # the old code called predictor.predict_player_points() per player,
+            # which is what produced numbers unrelated to the actual objective.
+            POS_SHORT = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
             results = [
-                f"🎯 OPTIMAL SQUAD (Enhanced Multi-GW Optimization)",
-                f"📅 Analyzed: GW{current_gw} to GW{current_gw + num_gws - 1}",
-                f"💰 Cost: £{lineup_info['total_cost']:.1f}m / £{budget}m",
-                f"💵 Remaining: £{lineup_info['money_remaining']:.1f}m",
-                f"⚡ Expected Points (next {num_gws} GWs): {lineup_info['expected_points']:.1f}",
+                "🎯 OPTIMAL SQUAD (strategy-driven, v2 model objective)",
+                f"📅 Planned: GW{current_gw} to GW{current_gw + num_gws - 1}",
+                f"💰 Cost: £{lineup_info['total_cost']:.1f}m / £{budget}m "
+                f"(XI £{lineup_info['xi_cost']:.1f}m + bench £{lineup_info['bench_cost']:.1f}m)",
+                f"💵 In the bank: £{lineup_info['bank']:.1f}m",
+                f"⚡ Predicted XI points (next GW): {lineup_info['predicted_xi_points']:.1f}",
                 f"📐 Formation: {lineup_info['formation']}",
-                f"\n🟢 STARTING 11:",
+                "\n🟢 STARTING 11:",
             ]
 
-            # Show starting 11
-            for player in lineup_info['starting_11']:
-                team = teams_data[player['team']]
-                pos = POSITIONS[player['element_type']]
-                pred_pts = predictor.predict_player_points(player, {}, {})
+            for pl in sorted(lineup_info['starting'],
+                             key=lambda x: (x['position_id'], -x['predicted_points'])):
+                flag = ""
+                if pl.get('xg_signal') == 'overperforming':
+                    flag = "  ⚠️ above xG — price inflated by finishing luck"
+                elif pl.get('xg_signal') == 'underperforming':
+                    flag = "  ✅ below xG on real chances — should correct"
                 results.append(
-                    f"  {pos} | {player['web_name']} ({team['short_name']}) - "
-                    f"£{player['now_cost'] / 10}m - {pred_pts:.1f}pts/gw"
+                    f"  {POS_SHORT.get(pl['position_id'], '?')} | {pl['name']} ({pl['team']}) - "
+                    f"£{pl['price']}m - {pl['predicted_points']:.2f} pred pts, "
+                    f"{pl['start_prob']:.0%} to start{flag}"
                 )
 
-            # Show bench
-            results.append(f"\n🪑 BENCH (Cost-minimized):")
-            bench_cost = sum([p['now_cost'] / 10 for p in lineup_info['bench']])
-            results.append(f"  Total bench cost: £{bench_cost:.1f}m")
-            for player in lineup_info['bench']:
-                team = teams_data[player['team']]
-                pos = POSITIONS[player['element_type']]
+            results.append(
+                f"\n🪑 BENCH (£{lineup_info['bench_cost']:.1f}m — capped, and every pick must "
+                "actually play so it is real cover, not fodder):"
+            )
+            for i, pl in enumerate(sorted(lineup_info['bench'],
+                                          key=lambda x: (x['position_id'] != 1,
+                                                         -x['predicted_points'])), 1):
                 results.append(
-                    f"  {pos} | {player['web_name']} ({team['short_name']}) - £{player['now_cost'] / 10}m"
+                    f"  {i}. {POS_SHORT.get(pl['position_id'], '?')} | {pl['name']} "
+                    f"({pl['team']}) - £{pl['price']}m - {pl['start_prob']:.0%} to start"
                 )
 
-            results.append(f"\n💡 Strategy: Optimized for {optimize_for} over next {num_gws} gameweeks")
-            results.append(f"📈 Smart bench: Cheap enablers to maximize starting 11 budget")
+            if meta.get('rotation_pairs'):
+                results.append("\n🔄 Rotation pairs worth knowing (complementary fixtures):")
+                for pr in meta['rotation_pairs'][:3]:
+                    results.append(
+                        f"  {pr['players'][0]} ({pr['teams'][0]}) + {pr['players'][1]} "
+                        f"({pr['teams'][1]}) £{pr['combined_price']}m — covers GW{pr['covered_gameweeks']}"
+                    )
+
+            results.append(
+                "\n💡 Objective: maximise v2-model predicted points, bench scored at a discount "
+                "and its spend capped — so money stays on the pitch instead of being force-spent."
+            )
+            results.append(
+                "⚠️  Check availability (get_team_news / search_player_news) before committing: "
+                "this optimises on data, it does not read press conferences."
+            )
 
             return [types.TextContent(type="text", text="\n".join(results))]
         except Exception as e:
@@ -2134,6 +2277,170 @@ async def handle_call_tool(
                 results.append(f"  ... and {len(knocks_and_bans) - 30} more")
 
         return [types.TextContent(type="text", text="\n".join(results))]
+
+    elif name == "get_squad_strategy":
+        num_gws = min(max(int(arguments.get('num_gameweeks', 5) or 5), 1), 10)
+
+        data = await make_fpl_request("bootstrap-static/")
+        fixtures_data = await make_fpl_request("fixtures/")
+        if "error" in data:
+            return [types.TextContent(type="text", text=f"Error fetching FPL data: {data['error']}")]
+
+        teams = {t['id']: t for t in data.get('teams', [])}
+        start_gw = planning_gameweek(data.get('events', []))
+        available = availability_filter.filter_available_players(
+            data.get('elements', []), min_chance=SQUAD_MIN_CHANCE
+        )
+
+        # Understat xG powers the bargain/regression analysis. Optional: if the
+        # enhanced collection is unavailable the value analysis degrades to
+        # points-per-million rather than failing the whole tool.
+        try:
+            # Returns (players, match_stats) — unpacking is required; treating the
+            # tuple as a list of players silently yields garbage.
+            enhanced, _match_stats = enhanced_collector.collect_enhanced_data(available)
+            by_id = {p['id']: p for p in enhanced} if enhanced else {}
+            if by_id:
+                available = [
+                    {**p, **{k: v for k, v in by_id.get(p['id'], {}).items()
+                             if k.startswith(("xG", "xA", "npxG"))}}
+                    for p in available
+                ]
+        except Exception:
+            pass
+
+        raw = ml_predict_v2.predict_points(available)
+        if not raw:
+            return [types.TextContent(type="text", text=(
+                "Strategy analysis needs the points model, which isn't available on this "
+                "deployment. Fixtures, team news and injury data still work."
+            ))]
+        preds = {pid: {"predicted_points": v.get("predicted_points", 0.0),
+                       "start_prob": v.get("play_probability", 0.0)}
+                 for pid, v in raw.items()}
+
+        runs = fpl_strategy.build_fixture_runs(fixtures_data, teams, start_gw, num_gws)
+        _shortlist, meta = fpl_strategy.build_shortlist(available, teams, runs, preds)
+
+        out = [f"**Squad strategy — GW{start_gw} to GW{start_gw + num_gws - 1}**", ""]
+
+        out.append("**Best clean-sheet outlook** (fixture softness x defensive strength):")
+        for t in meta["clean_sheet_teams"][:6]:
+            out.append(f"  {t['team']}: score {t['cs_score']}, avg FDR {t['avg_fdr']}")
+        out.append("  A strong defence with a hard run still concedes — pair these with team news.")
+        out.append("")
+
+        if meta["rotation_pairs"]:
+            out.append("**Budget rotation pairs** (start whichever has the better fixture):")
+            for pr in meta["rotation_pairs"][:4]:
+                out.append(
+                    f"  {pr['players'][0]} ({pr['teams'][0]}) + {pr['players'][1]} "
+                    f"({pr['teams'][1]}) £{pr['combined_price']}m — good fixtures cover "
+                    f"GW{pr['covered_gameweeks']}, overlap GW{pr['overlap_gameweeks'] or 'none'}"
+                )
+            out.append("")
+
+        if meta["value_picks"]:
+            out.append("**Best value** (points per £m, cheap and playing):")
+            for v in meta["value_picks"][:6]:
+                out.append(f"  {v['name']} ({v['team']}) {v['position']} £{v['price']}m — "
+                           f"{v['points_per_million']} pts/£m, {v['start_prob']:.0%} to start")
+            out.append("")
+
+        if meta["underperforming_bargains"]:
+            out.append("**xG bargains** (below expected on real chances — tends to correct):")
+            for v in meta["underperforming_bargains"][:5]:
+                note = next((r for r in v["reasons"] if "BELOW xG" in r), "")
+                out.append(f"  {v['name']} ({v['team']}) £{v['price']}m — {note}")
+            out.append("")
+
+        if meta["regression_risks"]:
+            out.append("**Regression risks** (above xG — price inflated by finishing luck):")
+            for v in meta["regression_risks"][:5]:
+                note = next((r for r in v["reasons"] if "above xG" in r), "")
+                out.append(f"  {v['name']} ({v['team']}) £{v['price']}m — {note}")
+            out.append("")
+
+        br = meta["budget_rules"]
+        out.append(
+            f"**Budget principle:** keep bench spend under ~£{br['bench_spend_cap']}m, and require "
+            f"bench players to be >={br['bench_min_start_prob']:.0%} likely to start — a substitute "
+            "who never plays is not cover. Money saved on the bench upgrades a starter."
+        )
+        return [types.TextContent(type="text", text="\n".join(out))]
+
+    elif name == "search_player_news":
+        names = arguments.get('player_names') or []
+        if not names:
+            return [types.TextContent(type="text", text="Provide at least one player name.")]
+
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            return [types.TextContent(type="text", text=f"Error fetching FPL data: {data['error']}")]
+        all_players = data.get('elements', [])
+        teams = {t['id']: t.get('name', '') for t in data.get('teams', [])}
+
+        # Enrich each requested player with FPL's own flag plus the two
+        # third-party feeds, so the search can CROSS-REFERENCE rather than
+        # taking any single source's word for it.
+        # Both fetchers are async and take an aiohttp session (same pattern as
+        # get_team_news above). Calling them bare returns un-awaited coroutines,
+        # so the cross-reference would silently have no third-party data at all.
+        try:
+            async with aiohttp.ClientSession() as session:
+                kb, scout = await asyncio.gather(
+                    fetch_knocks_and_bans(session),
+                    fetch_ffscout_team_news(session),
+                )
+        except Exception as e:
+            logger.warning(f"Third-party news fetch failed: {e}")
+            kb, scout = [], []
+
+        kb_by_name = {str(e.get('name', '')).strip().lower(): e for e in kb}
+
+        selected = []
+        for wanted in names[:6]:
+            needle = wanted.lower()
+            match = next(
+                (p for p in all_players
+                 if needle in p.get('web_name', '').lower()
+                 or needle in f"{p.get('first_name','')} {p.get('second_name','')}".lower()),
+                None,
+            )
+            if not match:
+                continue
+            kb_entry = kb_by_name.get(match.get('web_name', '').strip().lower())
+            scout_note = None
+            for team_news in scout:
+                for bucket in ('doubts', 'injured', 'suspended', 'predicted_xi'):
+                    for entry in (team_news.get(bucket) or []):
+                        if match.get('web_name', '').lower() in str(entry).lower():
+                            scout_note = f"{bucket}: {entry}"
+                            break
+            selected.append({
+                "name": match.get('web_name'),
+                "team": teams.get(match.get('team'), ''),
+                "chance_of_playing": match.get('chance_of_playing_next_round'),
+                "news": match.get('news') or '',
+                "knocks_and_bans": (kb_entry.get('status') if kb_entry else None),
+                "ffscout": scout_note,
+            })
+
+        if not selected:
+            return [types.TextContent(type="text", text=(
+                f"Could not find any of those players: {', '.join(names)}"
+            ))]
+
+        result = _search_player_news(selected)
+        if not result.get('available'):
+            return [types.TextContent(type="text", text=(
+                result.get('report')
+                or "Live news search is unavailable (needs ANTHROPIC_API_KEY on this deployment)."
+            ))]
+        searches = result.get('searches_run')
+        footer = f"\n\n_(cross-referenced FPL + Knocks and Bans + FFScout"
+        footer += f", {searches} web searches)_" if searches else ")_"
+        return [types.TextContent(type="text", text=result.get('report', '') + footer)]
 
     else:
         raise ValueError(f"Unknown tool: {name}")

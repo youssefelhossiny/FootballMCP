@@ -1,0 +1,143 @@
+# External trigger for the autonomous FPL bot.
+#
+# Why this exists rather than an in-process scheduler: the API is deployed on
+# Render's free tier, which spins the service down when idle. A spun-down
+# process cannot fire an APScheduler job — it is not late, it is absent. A
+# self-pinger does not fix that either; it burns the same free instance hours it
+# is trying to protect.
+#
+# GitHub Actions runs outside the service, and the request itself wakes it. The
+# endpoint auto-detects whether an early or final run is due, so this can fire
+# on a coarse schedule and still catch both windows.
+#
+# Required repository secrets:
+#   FPL_API_URL     — e.g. https://your-service.onrender.com
+#   FPL_ACCESS_CODE — the access code /api/auth/verify expects
+#
+# NOTE: whether anything is actually WRITTEN to FPL is decided server-side by
+# FPL_BOT_MODE (default `notify` = writes nothing). This workflow cannot
+# override that, by design.
+
+name: FPL bot run
+
+on:
+  schedule:
+    # Every 30 minutes. Most runs are a cheap "nothing due" no-op; the endpoint
+    # only invokes the agent inside a real run window. Cron is UTC, which
+    # matters twice a year when the UK clocks change — FPL deadlines are read
+    # from FPL's own API, so the windows follow the deadline, not this cron.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      run_type:
+        description: "Force a specific run (leave blank to auto-detect)"
+        required: false
+        type: choice
+        options: ["", "early", "final"]
+      force:
+        description: "Run even if this gameweek already ran"
+        required: false
+        default: false
+        type: boolean
+
+# Never let two runs overlap: a second decision could submit a conflicting
+# lineup and silently win.
+concurrency:
+  group: fpl-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Wake service and authenticate
+        id: auth
+        env:
+          API_URL: ${{ secrets.FPL_API_URL }}
+          ACCESS_CODE: ${{ secrets.FPL_ACCESS_CODE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_URL:-}" ] || [ -z "${ACCESS_CODE:-}" ]; then
+            echo "::error::FPL_API_URL and FPL_ACCESS_CODE secrets must be set."
+            exit 1
+          fi
+
+          # A dozing free-tier service can take ~60s for its first response, so
+          # poll health before trying to authenticate.
+          for i in $(seq 1 20); do
+            if curl -fsS --max-time 60 "$API_URL/api/health" > /dev/null 2>&1; then
+              echo "Service awake after ${i} attempt(s)."
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "::error::Service did not wake up."
+              exit 1
+            fi
+            sleep 15
+          done
+
+          TOKEN=$(curl -fsS --max-time 60 -X POST "$API_URL/api/auth/verify" \
+            -H 'Content-Type: application/json' \
+            -d "{\"code\":\"${ACCESS_CODE}\"}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')
+
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Authentication failed — check FPL_ACCESS_CODE."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger bot run
+        env:
+          API_URL: ${{ secrets.FPL_API_URL }}
+          TOKEN: ${{ steps.auth.outputs.token }}
+          RUN_TYPE: ${{ inputs.run_type }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          QS="submit=true"
+          [ -n "${RUN_TYPE:-}" ] && QS="$QS&run_type=${RUN_TYPE}"
+          [ "${FORCE:-false}" = "true" ] && QS="$QS&force=true"
+
+          # The agent makes many tool calls (news, ML, web search), so allow a
+          # long read timeout. --fail-with-body so a 4xx/5xx still prints why.
+          HTTP=$(curl -sS --fail-with-body --max-time 1500 \
+            -o response.json -w '%{http_code}' \
+            -X POST "$API_URL/api/bot/run?$QS" \
+            -H "Authorization: Bearer $TOKEN") || true
+
+          echo "HTTP $HTTP"
+          python3 -m json.tool response.json || cat response.json
+
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Bot run returned HTTP $HTTP"
+            exit 1
+          fi
+
+          # "ran: false" is a normal no-op outside a run window. A run that
+          # started and failed must surface, not pass quietly.
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("response.json"))
+          if d.get("ran"):
+              s = d.get("summary", {}) or {}
+              print(f"::notice::GW{d.get('gameweek')} {d.get('run_type')} run — "
+                    f"captain={s.get('captain')} transfers={s.get('transfers')} "
+                    f"confidence={s.get('confidence')} submitted={s.get('submitted')}")
+          elif d.get("error"):
+              print(f"::error::Run failed: {d['error']}")
+              sys.exit(1)
+          else:
+              print(f"::notice::No run: {d.get('reason') or d.get('skipped')}")
+          PY
+
+      - name: Upload run response
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-run-response
+          path: response.json
+          if-no-files-found: ignore
+          retention-days: 14

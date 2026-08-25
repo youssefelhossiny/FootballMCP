@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fpl-optimizer": {
+      "command": "/Users/youssefelhossiny/Documents/GitHub/Football-MCP/fpl-optimizer/.venv/bin/python",
+      "args": ["/Users/youssefelhossiny/Documents/GitHub/Football-MCP/fpl-optimizer/Server.py"]
+    }
+  }
+}
