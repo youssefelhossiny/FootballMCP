@@ -86,11 +86,10 @@
         <string>/Users/youssefelhossiny/.nvm/versions/node/v22.14.0/bin/claude</string>
         <key>HOME</key>
         <string>/Users/youssefelhossiny</string>
-        <!--
-          Set this once Clanker FC exists, so the bot analyses the real squad
-          instead of giving generic advice:
-          <key>BOT_TEAM_ID</key><string>1234567</string>
-        -->
+        <!-- Clanker FC. Without this the bot gives generic advice, not
+             squad-specific analysis. -->
+        <key>BOT_TEAM_ID</key>
+        <string>7575639</string>
     </dict>
 
     <!-- stdout/stderr from launchd itself; the script keeps its own log. -->

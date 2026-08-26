@@ -141,6 +141,19 @@ class PlayerTag:
 XG_OVERPERFORM_THRESHOLD = float(os.getenv("XG_OVERPERFORM_THRESHOLD", "1.5"))
 XG_UNDERPERFORM_THRESHOLD = float(os.getenv("XG_UNDERPERFORM_THRESHOLD", "-1.0"))
 
+# "Unproven in this league" discount, applied to players whose underlying stats
+# are BACKFILLED FROM A PRIOR SEASON (see enhanced_features' prior-season pass)
+# rather than earned in the current one.
+#
+# Two distinct populations get this, and both deserve caution:
+#   * established players who simply have not featured yet — last season's
+#     numbers are real but stale (form, role and team can all have changed);
+#   * anyone whose only history is elsewhere — cross-league xG does not
+#     translate one-for-one, since league strength differs materially.
+# Rather than throw the data away (which made these players INVISIBLE to
+# selection — the bug this fixes), the signal is kept and marked down.
+PRIOR_SEASON_THREAT_DISCOUNT = float(os.getenv("PRIOR_SEASON_THREAT_DISCOUNT", "0.75"))
+
 
 def value_and_underlying(player: Dict, predicted_points: float) -> Dict:
     """
@@ -168,10 +181,30 @@ def value_and_underlying(player: Dict, predicted_points: float) -> Dict:
     xa90 = float(player.get("xA_per_90") or 0)
     threat90 = xg90 + xa90
 
+    # Unproven-in-this-season tax. These numbers were earned in a PRIOR season,
+    # so they are evidence but weaker evidence: discount the threat rate and say
+    # so explicitly, rather than letting stale xG read as current form.
+    is_prior = bool(player.get("stats_are_prior_season"))
+    raw_threat90 = threat90
+    if is_prior:
+        threat90 *= PRIOR_SEASON_THREAT_DISCOUNT
+
     signal, notes = None, []
+    if is_prior:
+        season = player.get("stats_season")
+        notes.append(
+            f"⚠️ underlying stats are from {season or 'a prior season'}, not this one "
+            f"(no appearances yet) — discounted {(1 - PRIOR_SEASON_THREAT_DISCOUNT):.0%} "
+            f"({raw_threat90:.2f} → {threat90:.2f} xG+xA/90); treat as unproven here"
+        )
     if over is not None:
         over = float(over)
-        if over >= XG_OVERPERFORM_THRESHOLD:
+        if is_prior:
+            # A regression/bargain call needs CURRENT-season finishing data.
+            # Declaring "due for goals" off last season's numbers would be a
+            # confident claim built on the wrong season.
+            signal = "unproven"
+        elif over >= XG_OVERPERFORM_THRESHOLD:
             signal = "overperforming"
             notes.append(
                 f"scored {over:.1f} above xG — finishing likely to regress, "
@@ -196,6 +229,8 @@ def value_and_underlying(player: Dict, predicted_points: float) -> Dict:
         "points_per_million_predicted": round(ppm_predicted, 2),
         "xg_signal": signal,
         "threat_per_90": round(threat90, 3),
+        "threat_per_90_raw": round(raw_threat90, 3),
+        "stats_are_prior_season": is_prior,
         "notes": notes,
     }
 

@@ -1114,6 +1114,38 @@ without checking these flags, so a backfilled player's regression/bargain verdic
 last season. That is still better than the player being invisible, but the flags exist now and the
 strategy layer should discount or annotate them.
 
+### Prior-season / unproven tax on backfilled stats (2026-08-25)
+Closes the follow-up flagged above. `fpl_strategy.value_and_underlying()` was reading
+`xG_overperformance` without checking the backfill flags, so a player whose stats came from LAST season
+got the same confident verdict as one with current-season data.
+
+Now `stats_are_prior_season` triggers three things:
+1. **A 25% discount on the threat rate** (`PRIOR_SEASON_THREAT_DISCOUNT`, env-tunable) — the data is kept,
+   because discarding it is what made these players invisible in the first place, but marked down.
+2. **The xG verdict becomes `unproven`** rather than `overperforming`/`underperforming`. A
+   regression-or-bargain call needs CURRENT-season finishing data; declaring someone "due for goals" off
+   last season's numbers is a confident claim built on the wrong season.
+3. **An explicit note** naming the season and the discount, so the agent can reason about it rather than
+   silently inheriting it.
+Verified with identical inputs: prior-season → `unproven`, 0.75 → 0.56 xG+xA/90 with a warning;
+current-season → `underperforming`, full 0.75, "genuine bargain".
+
+This also covers the **non-Premier-League** case the user asked about. ~17 of the 129 permanently
+unmatched are notable outfielders (N.Jackson, Kulusevski, Promise David, Manzambi, Touré) who are absent
+because they **did not play in the EPL last season** — new signings from abroad, long-term injuries,
+returning loanees. Verified absent from both 2026/27 and 2025/26 EPL datasets, so no name mapping can
+reach them. Scraping their foreign-league profiles was considered and **rejected**: cross-league xG does
+not translate one-for-one (league strength differs materially), it would not help the injured ones at all
+(Kulusevski/Manzambi have unknown return dates — that is a team-news problem, already covered by
+`search_player_news`), and all 17 have zero minutes, so each resolves automatically the moment he plays.
+Of the remaining 129: **31 are goalkeepers** (Understat is an xG/xA dataset and does not model keepers,
+so a profile would add nothing) and 108 are sub-0.5%-owned fringe/academy players.
+
+### Clanker FC is live
+Team **7575639** verified against the FPL API: real entry, joined 2026-08-21, **29 points in GW1**,
+£100.0m squad value. `BOT_TEAM_ID` is now set in the plist (both the repo copy and the installed one), so
+the bot analyses the actual squad instead of giving generic advice.
+
 ### Known remaining gaps (do not assume these are done)
 - The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
   `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and
