@@ -1089,6 +1089,31 @@ data) use it.
 **Verified after the fix:** Understat 312 matched, FBRef 352 matched, and **0 players with minutes
 unmatched on either source**.
 
+### Prior-season backfill — 171 established players were INVISIBLE (2026-08-25)
+Follow-up to the audit above, prompted by asking whether coverage held for players with **no** minutes.
+It did not. Understat only publishes a player once he has appeared, so after GW1 **300 of 612 FPL
+players had no row to match against** — not a name-matching failure, an absence of data. The consequence
+was a real blind spot rather than a cosmetic one: an unmatched player is invisible to the strategy layer,
+and the list included **Watkins (9% owned, £8.0m), Gyökeres (7.6%), Bruno G., Pedro Porro (13.9%) and
+Dubravka (18.9% owned — a bench pick this project itself recommended)**.
+
+Fix: `collect_enhanced_data` now runs a **prior-season backfill pass** for anyone unmatched against the
+current season, reusing the existing matcher against `PRIOR_SEASON`. Stale-but-real beats absent.
+Measured: **171 of 300 recovered**, taking the Understat rate **50.98% → 78.92%**. The remaining 129 are
+genuine newcomers with no EPL history in either season — uncoverable by any means.
+
+**Second bug caught while verifying, and worth the extra step.** The first run backfilled correctly but
+reported `prior=None` — `merge_player_data` copies named fields, so the `_stats_are_prior_season` tag was
+being silently dropped. Untagged stale data is **worse than no data**, because a consumer treats last
+season's xG as this season's form. Now propagated as `stats_are_prior_season` / `stats_season`.
+Verified: Watkins/Gyökeres/Bruno G. carry `prior_season=True, season=2025`; Haaland's genuine 2026/27
+xG (0.75) is untagged.
+
+**Downstream note for the next session:** `fpl_strategy.value_and_underlying()` reads `xG_overperformance`
+without checking these flags, so a backfilled player's regression/bargain verdict is currently based on
+last season. That is still better than the player being invisible, but the flags exist now and the
+strategy layer should discount or annotate them.
+
 ### Known remaining gaps (do not assume these are done)
 - The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
   `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and

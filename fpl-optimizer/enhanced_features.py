@@ -194,6 +194,15 @@ class EnhancedDataCollector:
 
             # Over/underperformance
             enhanced['xG_overperformance'] = understat_match.get('xG_overperformance', 0.0)
+
+            # Propagate the prior-season marker. merge_player_data copies named
+            # fields, so without this the tag set during backfill is silently
+            # dropped and last season's numbers become indistinguishable from
+            # this season's — which is worse than having no data, because a
+            # consumer would treat stale xG as current form.
+            if understat_match.get('_stats_are_prior_season'):
+                enhanced['stats_are_prior_season'] = True
+                enhanced['stats_season'] = understat_match.get('_stats_season')
             enhanced['xA_overperformance'] = understat_match.get('xA_overperformance', 0.0)
             enhanced['npxG_overperformance'] = understat_match.get('npxG_overperformance', 0.0)
 
@@ -480,6 +489,54 @@ class EnhancedDataCollector:
                 threshold=match_threshold
             )
             understat_stats = self.matcher.get_match_stats()
+
+            # PRIOR-SEASON FALLBACK for players who have not featured yet.
+            #
+            # Understat only publishes a player once he has appeared, so early in
+            # a season most of the game has no row at all — measured 2026-08-25
+            # after GW1: 310 of 612 FPL players had minutes, and Understat had
+            # exactly 310 rows. The other 300 were unmatched not through any
+            # name-matching failure but because THERE IS NO ROW TO MATCH.
+            #
+            # That silently hides established players from every downstream
+            # consumer: Watkins (9% owned), Gyökeres (7.6%), Bruno G., Dubravka
+            # (18.9% owned) all had zero advanced stats. An unmatched player is
+            # invisible to the strategy layer, so this is a real blind spot, not
+            # a cosmetic gap.
+            #
+            # Measured: 173 of those 300 exist in last season's data. Backfilling
+            # from PRIOR_SEASON is stale-but-real — far better than absent — and
+            # each backfilled player is tagged so consumers can discount it.
+            if understat_unmatched and understat_season != PRIOR_SEASON:
+                try:
+                    prior = self.fetch_understat_data(
+                        season=PRIOR_SEASON, use_cache=use_cache
+                    )
+                except Exception as e:
+                    prior = []
+                    print(f"   ⚠️  prior-season Understat fallback unavailable: {e}")
+
+                if prior:
+                    print(f"🔗 Backfilling {len(understat_unmatched)} players with no "
+                          f"{display_label(understat_season)} appearances from {display_label(PRIOR_SEASON)}...")
+                    self.matcher.clear_log()
+                    backfilled, still_unmatched = self.matcher.match_all_players(
+                        understat_unmatched, prior, threshold=match_threshold
+                    )
+                    for pid, row in backfilled.items():
+                        # Tag it, so nothing downstream mistakes last season's
+                        # numbers for this season's form.
+                        matched_understat[pid] = {**row, "_stats_season": PRIOR_SEASON,
+                                                  "_stats_are_prior_season": True}
+                    understat_unmatched = still_unmatched
+                    understat_stats['matched'] = len(matched_understat)
+                    understat_stats['unmatched'] = len(still_unmatched)
+                    understat_stats['backfilled_prior_season'] = len(backfilled)
+                    understat_stats['match_rate'] = round(
+                        len(matched_understat) / max(len(fpl_players), 1) * 100, 2
+                    )
+                    print(f"   ✅ backfilled {len(backfilled)}; "
+                          f"{len(still_unmatched)} have no history in either season")
 
         # Match FBRef players using same fuzzy matching logic
         matched_fbref = {}
