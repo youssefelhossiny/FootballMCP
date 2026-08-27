@@ -1141,11 +1141,21 @@ not translate one-for-one (league strength differs materially), it would not hel
 Of the remaining 129: **31 are goalkeepers** (Understat is an xG/xA dataset and does not model keepers,
 so a profile would add nothing) and 108 are sub-0.5%-owned fringe/academy players.
 
-### Clanker FC is live
+### Clanker FC is live — and the first real-squad run exposed a silent failure
 Team **7575639** verified against the FPL API: real entry, joined 2026-08-21, **29 points in GW1**,
-£100.0m squad value. `BOT_TEAM_ID` is now set in the plist (both the repo copy and the installed one), so
-the bot analyses the actual squad instead of giving generic advice.
+£100.0m squad value. `BOT_TEAM_ID` set in the plist (repo copy and installed copy).
 
+**Bug found by testing rather than assuming.** The first real-squad run produced *"No specific squad is
+configured"* — because a MANUAL run from a normal shell has no `BOT_TEAM_ID` exported; only launchd
+supplies it via the plist. The output still looked like a perfectly good FPL briefing, so the failure is
+**invisible unless you read the wording closely** — the worst kind. `run_bot.sh` now falls back to
+`~/.clankerfc/team_id` and **logs a WARNING** when no id is found, so generic output can never again pass
+silently as squad-specific.
+
+Verified after the fix: the run named the team, listed the real 15 (Haaland, Wirtz, Raya, Gabriel,
+Thiago, Mitchell, Van Hecke, Shaw…), read the £0.0m bank, and correctly declined to transfer Shaw on poor
+form **because he is on the bench** — squad-specific reasoning the generic run could not have produced.
+Runtime also fell to **265s** (from 792s) as caches warmed.
 ### Known remaining gaps (do not assume these are done)
 - The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
   `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and

@@ -108,8 +108,19 @@ mcp__fpl-optimizer__get_player_details,\
 mcp__fpl-optimizer__get_all_players,\
 mcp__fpl-optimizer__get_top_performers"
 
+# Team id: env var first (launchd supplies it via the plist), then a config
+# file. The file matters because a MANUAL run from a normal shell has no
+# BOT_TEAM_ID exported — the first real-squad test silently produced generic
+# advice for exactly that reason, and the failure is invisible in the output
+# unless you read the wording carefully.
 TEAM_ID="${BOT_TEAM_ID:-}"
+if [[ -z "$TEAM_ID" && -f "$HOME/.clankerfc/team_id" ]]; then
+  TEAM_ID="$(tr -d '[:space:]' < "$HOME/.clankerfc/team_id")"
+fi
 TEAM_LINE="No BOT_TEAM_ID is configured, so analyse generally rather than for a specific squad."
+if [[ -z "$TEAM_ID" ]]; then
+  log "WARNING: no team id (env or ~/.clankerfc/team_id) — output will be GENERIC, not squad-specific"
+fi
 if [[ -n "$TEAM_ID" ]]; then
   TEAM_LINE="The team id is $TEAM_ID — use get_my_team to load the current squad."
 fi
