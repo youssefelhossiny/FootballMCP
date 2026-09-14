@@ -4,6 +4,8 @@ import ChatInterface from '../components/ChatInterface'
 import PlayerFinder from '../components/PlayerFinder'
 import PlayerProfile from '../components/PlayerProfile'
 import TopBar from '../components/TopBar'
+import { AnalyticsSection } from './MyAnalyticsPage'
+import { DEMO_TEAM_ID } from '../lib/demo'
 
 const POSITION_TO_NUMBER = { GKP: 1, GK: 1, DEF: 2, MID: 3, FWD: 4 }
 const NUMBER_TO_POSITION = { 1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD' }
@@ -14,6 +16,8 @@ function UserTeamPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [savedTeamId, setSavedTeamId] = useState(null)
+  // 'squad' = the transfer cockpit, 'analytics' = season performance.
+  const [section, setSection] = useState('squad')
 
   // Transfer state
   const [viewMode, setViewMode] = useState('current')
@@ -38,12 +42,12 @@ function UserTeamPage() {
   const [profilePlayerName, setProfilePlayerName] = useState(null)
 
   useEffect(() => {
-    const saved = localStorage.getItem('fpl_team_id')
-    if (saved) {
-      setTeamId(saved)
-      setSavedTeamId(saved)
-      fetchTeam(saved)
-    }
+    // Fall back to the demo team so a first-time visitor sees a working page
+    // (squad + analytics) instead of an empty form.
+    const saved = localStorage.getItem('fpl_team_id') || DEMO_TEAM_ID
+    setTeamId(saved)
+    setSavedTeamId(saved)
+    fetchTeam(saved)
   }, [])
 
   const fetchTeam = async (id) => {
@@ -303,6 +307,28 @@ function UserTeamPage() {
       />
 
       {team && (
+        <>
+          {/* Section switch — keeps squad work and season analytics on ONE page
+              so the team id is entered once and shared. */}
+          <div className="flex gap-1">
+            {[['squad', 'Squad & Transfers'], ['analytics', 'Season Analytics']].map(([k, label]) => (
+              <button key={k} onClick={() => setSection(k)}
+                className="px-3.5 py-1.5 rounded-md text-sm font-medium transition-colors"
+                style={section === k
+                  ? { background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }
+                  : { color: 'var(--text-secondary)' }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {team && section === 'analytics' && (
+        <AnalyticsSection teamId={savedTeamId} />
+      )}
+
+      {team && section === 'squad' && (
         <>
           {/* Top stats strip */}
           <TopBar

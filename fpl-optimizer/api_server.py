@@ -1871,6 +1871,10 @@ async def get_team_analytics(team_id: int, league_id: Optional[int] = None):
         # a 60 is good in a low-scoring week and poor in a high-scoring one.
         events = {e["id"]: e for e in (bootstrap or {}).get("events", [])}
 
+        # Player names for "most captained", so the world-context panel can show
+        # who everyone else backed rather than an opaque element id.
+        elements = {e["id"]: e.get("web_name") for e in (bootstrap or {}).get("elements", [])}
+
         gameweeks = []
         for row in current:
             gw = row["event"]
@@ -1884,6 +1888,14 @@ async def get_team_analytics(team_id: int, league_id: Optional[int] = None):
                 "average": avg,
                 "highest": highest,
                 "vs_average": pts - avg,
+                # Share of the top score — shows how close to a perfect week you got.
+                "pct_of_best": round(pts / highest * 100) if highest else None,
+                # FPL's own per-gameweek world percentile (1 = best).
+                "percentile": row.get("percentile_rank"),
+                "most_captained": elements.get(ev.get("most_captained")),
+                "chip_plays": {c["chip_name"]: c["num_played"]
+                               for c in (ev.get("chip_plays") or [])},
+                "managers_ranked": ev.get("ranked_count"),
                 "total_points": row.get("total_points", 0),
                 "overall_rank": row.get("overall_rank"),
                 "gw_rank": row.get("rank"),
@@ -1921,7 +1933,31 @@ async def get_team_analytics(team_id: int, league_id: Optional[int] = None):
             "squad_value": round((entry.get("last_deadline_value") or 1000) / 10, 1),
             "bank": round((entry.get("last_deadline_bank") or 0) / 10, 1),
             "chips_used": [{"name": c["name"], "gameweek": c.get("event")} for c in chips_used],
+            # Where you sit among everyone playing, not just your mini-leagues.
+            "world_percentile": (
+                round(entry.get("summary_overall_rank") / total_managers * 100, 1)
+                if (total_managers := (bootstrap or {}).get("total_players"))
+                and entry.get("summary_overall_rank") else None
+            ),
+            "total_managers": (bootstrap or {}).get("total_players"),
+            "best_percentile_gw": (
+                min((g for g in gameweeks if g.get("percentile")),
+                    key=lambda g: g["percentile"], default=None)
+            ),
         }
+
+        # Prior seasons, so a manager can see whether this year is actually
+        # going better or worse than their own history — the comparison most
+        # dashboards omit.
+        past_seasons = [
+            {
+                "season": p.get("season_name"),
+                "total_points": p.get("total_points"),
+                "rank": p.get("rank"),
+                "rank_percentage": p.get("rank_percentage"),
+            }
+            for p in (history.get("past", []) or [])
+        ]
 
         leagues = [
             {
@@ -1940,6 +1976,7 @@ async def get_team_analytics(team_id: int, league_id: Optional[int] = None):
             "summary": summary,
             "gameweeks": gameweeks,
             "leagues": leagues,
+            "past_seasons": past_seasons,
         }
 
     except HTTPException:

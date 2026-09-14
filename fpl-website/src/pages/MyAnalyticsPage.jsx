@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { DEMO_TEAM_ID } from '../lib/demo'
 
 /**
  * Season analytics for the user's own team.
@@ -18,7 +19,7 @@ import { useState, useEffect, useMemo } from 'react'
  * than two that can disagree.
  */
 export function AnalyticsSection({ teamId: teamIdProp }) {
-  const [teamId, setTeamId] = useState(teamIdProp || localStorage.getItem('fpl_team_id') || '')
+  const [teamId, setTeamId] = useState(teamIdProp || localStorage.getItem('fpl_team_id') || DEMO_TEAM_ID)
   const [inputId, setInputId] = useState('')
   const [data, setData] = useState(null)
   const [leagueId, setLeagueId] = useState(null)
@@ -93,7 +94,7 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
           <input
             value={inputId}
             onChange={(e) => setInputId(e.target.value)}
-            placeholder="e.g. 7575639"
+            placeholder={`e.g. ${DEMO_TEAM_ID}`}
             className="px-3 py-2 rounded-md text-sm outline-none"
             style={{
               background: 'var(--bg-elevated)',
@@ -132,7 +133,7 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
 
   if (!data) return null
 
-  const { summary, gameweeks, leagues } = data
+  const { summary, gameweeks, leagues, past_seasons: pastSeasons } = data
   const latest = gameweeks[gameweeks.length - 1]
 
   return (
@@ -169,7 +170,18 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
           sub={`£${summary.bank}m banked`} />
       </div>
 
+      <WorldStanding summary={summary} gameweeks={gameweeks} />
+
       <PointsChart gameweeks={gameweeks} />
+
+      <div className="grid lg:grid-cols-2 gap-5">
+        <PercentileChart gameweeks={gameweeks} />
+        <CeilingChart gameweeks={gameweeks} />
+      </div>
+
+      {pastSeasons?.length > 0 && <PastSeasons seasons={pastSeasons} summary={summary} />}
+
+      <WorldContext gameweeks={gameweeks} />
 
       <div className="grid lg:grid-cols-2 gap-5">
         <RankChart gameweeks={gameweeks} rankChange={summary.rank_change} />
@@ -255,6 +267,214 @@ function Delta({ label, value, suffix }) {
       <div className="text-lg font-medium" style={{ fontFamily: 'var(--font-num)', color }}>
         {value > 0 ? '+' : ''}{value}
         <span className="text-[11px] text-muted ml-1">{suffix}</span>
+      </div>
+    </div>
+  )
+}
+
+/* ---------- World standing ---------- */
+
+function WorldStanding({ summary, gameweeks }) {
+  const pct = summary.world_percentile
+  const best = summary.best_percentile_gw
+  // Percentile is 1 = best, so a LOW number is good.
+  const pctiles = gameweeks.map((g) => g.percentile).filter((v) => v != null)
+  const avgPctile = pctiles.length
+    ? Math.round(pctiles.reduce((a, b) => a + b, 0) / pctiles.length)
+    : null
+
+  return (
+    <div className="card p-5">
+      <SectionTitle
+        title="Where you stand in the world"
+        hint={`Out of ${summary.total_managers?.toLocaleString() ?? '—'} managers playing.`}
+      />
+      <div className="mt-4 grid md:grid-cols-4 gap-4 items-center">
+        <div className="md:col-span-2">
+          {/* A single bar is the clearest way to read "where am I" — position
+              along the whole population, not an abstract rank number. */}
+          <div className="relative h-8 rounded-md overflow-hidden"
+            style={{ background: 'linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-warn) 55%, var(--accent-danger) 100%)', opacity: 0.35 }}>
+            {pct != null && (
+              <div className="absolute top-0 bottom-0" style={{ left: `${Math.min(pct, 99.5)}%`, width: 3, background: '#fff' }} />
+            )}
+          </div>
+          <div className="flex justify-between text-[10px] text-muted mt-1">
+            <span>top 1%</span><span>median</span><span>bottom</span>
+          </div>
+          {pct != null && (
+            <div className="text-sm mt-2" style={{ color: 'var(--accent-primary)' }}>
+              You are in the <b>top {pct}%</b> — rank {summary.overall_rank?.toLocaleString()}
+            </div>
+          )}
+        </div>
+        <Stat label="Avg GW percentile" value={avgPctile != null ? `top ${avgPctile}%` : '—'}
+          sub="1 = best week in the world" />
+        <Stat label="Best week" value={best ? `top ${best.percentile}%` : '—'}
+          sub={best ? `GW${best.gameweek} · ${best.points} pts` : null}
+          tone="good" />
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Percentile trend ---------- */
+
+function PercentileChart({ gameweeks }) {
+  const pts = gameweeks.filter((g) => g.percentile != null)
+  if (!pts.length) return null
+  const W = 100, H = 100
+  // Percentile 1 = best, so invert: a HIGH line means a good week.
+  const coords = pts.map((g, i) => [
+    pts.length === 1 ? 0 : (i / (pts.length - 1)) * W,
+    (g.percentile / 100) * H,
+  ])
+  const path = coords.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
+
+  return (
+    <div className="card p-5">
+      <SectionTitle title="Weekly world percentile"
+        hint="Your rank among all managers that week. Higher on the chart = better." />
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: 140 }} className="mt-3">
+        {/* median reference */}
+        <line x1="0" y1={H / 2} x2={W} y2={H / 2} stroke="var(--border-strong)" strokeDasharray="2,2" strokeWidth="0.5" />
+        <path d={`${path} L${W},${H} L0,${H} Z`} fill="var(--accent-primary)" opacity="0.12" />
+        <path d={path} fill="none" stroke="var(--accent-primary)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        {coords.map(([x, y], i) => (
+          <circle key={i} cx={x} cy={y} r="1.6" fill="var(--accent-primary)" vectorEffect="non-scaling-stroke" />
+        ))}
+      </svg>
+      <div className="flex justify-between text-[10px] text-muted mt-1">
+        {pts.map((g) => <span key={g.gameweek}>GW{g.gameweek}<br />top {g.percentile}%</span>)}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Ceiling: how close to a perfect week ---------- */
+
+function CeilingChart({ gameweeks }) {
+  const rows = gameweeks.filter((g) => g.pct_of_best != null)
+  if (!rows.length) return null
+  return (
+    <div className="card p-5">
+      <SectionTitle title="How close to the best score in the world"
+        hint="Your points as a share of that week's highest-scoring manager." />
+      <div className="space-y-2.5 mt-4">
+        {rows.map((g) => (
+          <div key={g.gameweek} className="flex items-center gap-3">
+            <span className="text-[11px] text-muted w-10">GW{g.gameweek}</span>
+            <div className="flex-1 h-5 rounded" style={{ background: 'var(--bg-elevated)' }}>
+              <div className="h-full rounded flex items-center justify-end pr-1.5"
+                style={{
+                  width: `${g.pct_of_best}%`,
+                  background: g.pct_of_best >= 60 ? 'var(--accent-primary)'
+                    : g.pct_of_best >= 40 ? 'var(--accent-warn)' : 'var(--accent-danger)',
+                  opacity: 0.8,
+                }}>
+                <span className="text-[10px] font-medium" style={{ color: '#04140c' }}>{g.pct_of_best}%</span>
+              </div>
+            </div>
+            <span className="text-[11px] text-muted w-24 text-right">
+              {g.points} / {g.highest}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Season-over-season ---------- */
+
+function PastSeasons({ seasons, summary }) {
+  // Include this season so the comparison is like-for-like on the chart.
+  const rows = [...seasons, {
+    season: 'this season',
+    total_points: summary.total_points,
+    rank: summary.overall_rank,
+    rank_percentage: summary.world_percentile != null ? String(Math.round(summary.world_percentile)) : null,
+    current: true,
+  }]
+  const maxPts = Math.max(...rows.map((r) => r.total_points || 0), 1)
+
+  return (
+    <div className="card p-5">
+      <SectionTitle title="Season by season"
+        hint="Your own history — the comparison that says whether this year is actually going well." />
+      <div className="space-y-3 mt-4">
+        {rows.map((r) => {
+          const pctNum = r.rank_percentage != null ? Number(r.rank_percentage) : null
+          return (
+            <div key={r.season} className="flex items-center gap-3">
+              <span className="text-xs w-24" style={{ color: r.current ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                {r.season}
+              </span>
+              <div className="flex-1 h-6 rounded" style={{ background: 'var(--bg-elevated)' }}>
+                <div className="h-full rounded" style={{
+                  width: `${(r.total_points / maxPts) * 100}%`,
+                  background: r.current ? 'var(--accent-primary)' : 'var(--border-strong)',
+                  opacity: r.current ? 0.85 : 0.6,
+                }} />
+              </div>
+              <span className="text-xs w-16 text-right" style={{ fontFamily: 'var(--font-num)' }}>
+                {r.total_points?.toLocaleString()}
+              </span>
+              <span className="text-[11px] w-28 text-right text-muted">
+                {r.rank ? `#${r.rank.toLocaleString()}` : '—'}
+                {pctNum != null && (
+                  <span style={{ color: pctNum <= 10 ? 'var(--accent-primary)' : 'var(--text-muted)' }}>
+                    {' '}· top {pctNum}%
+                  </span>
+                )}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="text-[11px] text-muted mt-3">
+        Note: this season is {rows[rows.length - 1].total_points} points so far, so the bar is
+        partial — compare the rank percentage rather than the total.
+      </div>
+    </div>
+  )
+}
+
+/* ---------- What the rest of the world did ---------- */
+
+function WorldContext({ gameweeks }) {
+  const rows = gameweeks.filter((g) => g.most_captained || Object.keys(g.chip_plays || {}).length)
+  if (!rows.length) return null
+  const CHIP = { bboost: 'Bench Boost', freehit: 'Free Hit', wildcard: 'Wildcard', '3xc': 'Triple Captain' }
+  return (
+    <div className="card p-5">
+      <SectionTitle title="What everyone else did"
+        hint="The crowd's captain and chip usage each week — useful for judging differentials." />
+      <div className="overflow-x-auto mt-3">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wider text-muted">
+              <Th>GW</Th><Th>Most captained</Th><Th right>World avg</Th><Th right>Top score</Th><Th>Chips played</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((g) => (
+              <tr key={g.gameweek} style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                <Td>{g.gameweek}</Td>
+                <Td bold>{g.most_captained || '—'}</Td>
+                <Td right muted>{g.average}</Td>
+                <Td right muted>{g.highest}</Td>
+                <Td muted>
+                  {Object.entries(g.chip_plays || {})
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 2)
+                    .map(([k, v]) => `${CHIP[k] || k} ${(v / 1000).toFixed(0)}k`)
+                    .join(' · ') || '—'}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
