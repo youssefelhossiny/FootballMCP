@@ -3091,9 +3091,12 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
             history=conversation_history
         )
 
-        # Unpack tuple result (response, tools_used, transfers)
+        # Unpack (response, tools_used, transfers, failure_reason)
+        failure_reason = None
         if isinstance(result, tuple):
-            if len(result) == 3:
+            if len(result) == 4:
+                response, tools_used, transfer_list, failure_reason = result
+            elif len(result) == 3:
                 response, tools_used, transfer_list = result
             else:
                 response, tools_used = result
@@ -3102,12 +3105,23 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_token)):
             response, tools_used, transfer_list = result, [], []
 
         if not response:
-            # Fallback to rule-based only if Anthropic fails
-            print("⚠️ Anthropic returned no response, using fallback")
-            if player_details:
-                response = player_details
-            else:
-                response = await fallback_response(message.lower(), team_data, players, teams)
+            # The AI failed. Say so.
+            #
+            # This used to silently serve a rule-based answer, which looked like
+            # a real reply — a canned "Captain Pick: X / Form: Y" with NO tool
+            # calls. That is how a retired, 404-ing model went unnoticed for
+            # months, and it hid an out-of-credit account here too. The heuristic
+            # answer is still shown (it is better than nothing), but it is now
+            # clearly labelled as a fallback with the actual cause.
+            print(f"⚠️ AI unavailable: {failure_reason or 'no response'}")
+            heuristic = player_details or await fallback_response(
+                message.lower(), team_data, players, teams
+            )
+            reason = failure_reason or "The AI assistant did not return a response."
+            response = (
+                f"⚠️ **AI assistant unavailable** — {reason}\n\n"
+                f"Showing a basic non-AI answer instead:\n\n{heuristic}"
+            )
 
         # Convert transfer_list to TransferAction objects
         transfers = [

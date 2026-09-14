@@ -248,24 +248,22 @@ async def query_anthropic(
     # Check if Anthropic is available
     if Anthropic is None:
         return (
-            "Anthropic library not installed. Please run: pip install anthropic",
-            [],
-            []
+            None, [], [],
+            "The `anthropic` package is not installed on the server (pip install anthropic).",
         )
 
     # Check for API key
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return (
-            "ANTHROPIC_API_KEY environment variable not set.",
-            [],
-            []
+            None, [], [],
+            "ANTHROPIC_API_KEY is not set on the server, so the AI assistant cannot run.",
         )
 
     # First check if topic is allowed
     if not is_topic_allowed(message):
         print(f"[Anthropic] Blocked off-topic message: {message[:50]}...")
-        return (OFF_TOPIC_RESPONSE, [], [])
+        return (OFF_TOPIC_RESPONSE, [], [], None)
 
     # Initialize client
     client = Anthropic(api_key=api_key)
@@ -334,7 +332,7 @@ async def query_anthropic(
                 print(f"[Anthropic] Final response: {len(final_response)} chars")
                 print(f"[Anthropic] Tools used: {tools_used}")
                 print(f"[Anthropic] Transfers: {transfers}")
-                return (final_response, tools_used, transfers)
+                return (final_response, tools_used, transfers, None)
 
             # Execute tool calls
             tool_results = []
@@ -381,14 +379,31 @@ async def query_anthropic(
         return (
             "I apologize, but I had trouble processing that request. Please try again with a simpler question.",
             tools_used,
-            transfers
+            transfers,
+            None,
         )
 
     except Exception as e:
         print(f"[Anthropic] Error: {e}")
         import traceback
         traceback.print_exc()
-        return (None, [], [])
+        # Return the reason, not a bare None. The caller previously had no way
+        # to distinguish "the model failed" from "the model had nothing to say",
+        # so it quietly served a rule-based answer — which is exactly how a
+        # 404-ing retired model went unnoticed for months. A billing or auth
+        # failure must be visible to the user, not disguised as an answer.
+        detail = str(e)
+        if "credit balance is too low" in detail:
+            reason = ("The Anthropic API account is out of credit, so the AI assistant "
+                      "cannot run. Add credit at console.anthropic.com to re-enable it.")
+        elif "authentication" in detail.lower() or "api_key" in detail.lower():
+            reason = "The Anthropic API key is missing or invalid, so the AI assistant cannot run."
+        elif "not_found" in detail or "404" in detail:
+            reason = (f"The configured model ({CHAT_MODEL}) was rejected by the API — "
+                      "it may have been retired. Set ANTHROPIC_CHAT_MODEL to a current model.")
+        else:
+            reason = f"The AI assistant hit an error: {detail[:200]}"
+        return (None, [], [], reason)
 
 
 # For testing topic filtering
