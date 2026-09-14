@@ -12,6 +12,11 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
     server: {
       port: 3000,
+      // Bind all interfaces, not just IPv4 loopback. Vite's default binds
+      // 127.0.0.1 only, but macOS browsers resolve `localhost` to IPv6 ::1 —
+      // so http://localhost:3000 connected to nothing and hung on a blank page
+      // while http://127.0.0.1:3000 worked fine.
+      host: true,
       proxy: {
         '/api': {
           target,

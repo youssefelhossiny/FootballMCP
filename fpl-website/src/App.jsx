@@ -1,6 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
-import BotTeamPage from './pages/BotTeamPage'
 import UserTeamPage from './pages/UserTeamPage'
+import MyAnalyticsPage from './pages/MyAnalyticsPage'
 // StatsPage is built but not yet wired into the nav/routes — enable when ready.
 // import StatsPage from './pages/StatsPage'
 
@@ -20,8 +20,7 @@ function App() {
                 </div>
               </div>
               <div className="flex gap-1">
-                <NavItem to="/">Bot's Team</NavItem>
-                <NavItem to="/my-team">My Team</NavItem>
+                <NavItem to="/">My Team</NavItem>
               </div>
             </div>
           </div>
@@ -29,8 +28,10 @@ function App() {
 
         <main className="max-w-[1600px] mx-auto px-6 py-6">
           <Routes>
-            <Route path="/" element={<BotTeamPage />} />
+            <Route path="/" element={<UserTeamPage />} />
+            {/* Kept so any bookmarked /my-team link still resolves. */}
             <Route path="/my-team" element={<UserTeamPage />} />
+            <Route path="/analytics" element={<MyAnalyticsPage />} />
             {/* <Route path="/stats" element={<StatsPage />} /> */}
           </Routes>
         </main>

@@ -91,6 +91,7 @@ fi
 # real FPL team; the MCP server exposes no write tools today, and this allowlist
 # means adding one later cannot silently become reachable from a cron job.
 ALLOWED="mcp__fpl-optimizer__get_squad_strategy,\
+mcp__fpl-optimizer__get_price_changes,\
 mcp__fpl-optimizer__get_ml_prediction,\
 mcp__fpl-optimizer__get_team_news,\
 mcp__fpl-optimizer__get_injury_report,\
@@ -128,7 +129,8 @@ fi
 if [[ "$RUN_TYPE" == "early" ]]; then
   TIMING="This is the EARLY run, ~48h before the deadline. Its ONLY job is to flag a transfer whose
 TIMING is price-sensitive — someone you would buy anyway who is about to rise, or someone you would
-sell who is about to fall. Do NOT pick a captain or a chip now; more team news arrives before the
+sell who is about to fall. Call get_price_changes for FPL's OWN official projections rather than
+guessing from transfer counts; a price move is a timing signal only, never a reason to buy. Do NOT pick a captain or a chip now; more team news arrives before the
 deadline. If nothing is both merited AND urgent, say so plainly. That is the expected answer most weeks."
 else
   TIMING="This is the FINAL run, ~2h before the deadline. Press conferences have happened, so team

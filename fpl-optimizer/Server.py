@@ -727,6 +727,38 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="get_price_changes",
+            description=(
+                "Which players are closest to a PRICE RISE or FALL tonight, from FPL's own "
+                "official projections. FPL publishes `price_change_percent` (progress toward a "
+                "change: +100% triggers a rise, -100% a fall) plus per-day projections with a "
+                "likelihood score from -5 (near-certain fall) to +5 (near-certain rise). This is "
+                "the real thing, not a third-party estimate or a guess from transfer counts. "
+                "Use it when the timing of a transfer matters: buying before a rise saves money, "
+                "selling before a fall protects team value. IMPORTANT: a price rise is NEVER by "
+                "itself a reason to buy — only act when the player is already justified on merit "
+                "and the timing is what's in question. "
+                "Use for: 'Who's rising tonight?', 'Should I buy X now or wait?', "
+                "'Is anyone in my team about to drop?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["rising", "falling", "both"],
+                        "description": "Which way (default both)",
+                        "default": "both"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many per direction (default 10, max 25)",
+                        "default": 10
+                    }
+                }
+            }
+        ),
+        types.Tool(
             name="search_player_news",
             description=(
                 "Search the LIVE WEB for the latest injury/availability news on specific players, "
@@ -2367,6 +2399,59 @@ async def handle_call_tool(
             f"bench players to be >={br['bench_min_start_prob']:.0%} likely to start — a substitute "
             "who never plays is not cover. Money saved on the bench upgrades a starter."
         )
+        return [types.TextContent(type="text", text="\n".join(out))]
+
+    elif name == "get_price_changes":
+        direction = arguments.get('direction', 'both')
+        limit = min(max(int(arguments.get('limit', 10) or 10), 1), 25)
+
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            return [types.TextContent(type="text", text=f"Error fetching FPL data: {data['error']}")]
+
+        teams = {t['id']: t.get('short_name', '?') for t in data.get('teams', [])}
+
+        def pct(p):
+            try:
+                return float(p.get('price_change_percent') or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        players = [p for p in data.get('elements', []) if p.get('price_change_percent') is not None]
+        if not players:
+            return [types.TextContent(type="text", text=(
+                "FPL is not currently publishing price-change progress "
+                "(the fields are empty — this happens outside the normal daily window)."
+            ))]
+
+        def fmt(p, rising):
+            proj = (p.get('price_change_projections') or [{}])[0]
+            like = proj.get('likelihood')
+            # Likelihood runs -5 (certain fall) .. +5 (certain rise).
+            conf = {5: "near-certain", 4: "very likely", 3: "likely",
+                    2: "possible", 1: "outside chance"}.get(abs(like) if like else 0, "unclear")
+            net = (p.get('transfers_in_event', 0) or 0) - (p.get('transfers_out_event', 0) or 0)
+            return (f"  {p.get('web_name'):16s} ({teams.get(p.get('team'), '?')}) "
+                    f"£{p.get('now_cost', 0)/10:>4.1f}m  {pct(p):>6.1f}%  {conf}"
+                    f"  net transfers {net:+,}")
+
+        out = ["**Price changes — FPL's own projections**",
+               "(progress to a change: +100% rises, -100% falls)", ""]
+
+        if direction in ("rising", "both"):
+            top = sorted(players, key=lambda x: -pct(x))[:limit]
+            out.append("**Closest to a RISE** (buy before, if already justified on merit):")
+            out += [fmt(p, True) for p in top]
+            out.append("")
+
+        if direction in ("falling", "both"):
+            bottom = sorted(players, key=pct)[:limit]
+            out.append("**Closest to a FALL** (selling before protects team value):")
+            out += [fmt(p, False) for p in bottom]
+            out.append("")
+
+        out.append("Price movement is a TIMING signal, never a reason to buy on its own — "
+                   "chasing a rise into a bad asset costs more than the 0.1m it saves.")
         return [types.TextContent(type="text", text="\n".join(out))]
 
     elif name == "search_player_news":
