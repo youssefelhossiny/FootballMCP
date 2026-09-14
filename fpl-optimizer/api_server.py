@@ -93,6 +93,10 @@ enhanced_optimizer = EnhancedOptimizer()
 # player has to be clearly better than the alternatives to actually get picked.
 SQUAD_MIN_CHANCE = int(os.getenv("SQUAD_MIN_CHANCE", "50"))
 
+# How long to wait for Understat/FBRef enrichment before serving plain FPL data.
+# A cold FBRef scrape can take many minutes; no page should wait that long.
+ENHANCE_TIMEOUT_SECONDS = float(os.getenv("ENHANCE_TIMEOUT_SECONDS", "25"))
+
 # STARTING is permissive. Once a player is in the squad the transfer cost is
 # already sunk, so the only question is bench-or-start — and any chance of
 # playing beats a guaranteed zero, because FPL auto-substitutes if he doesn't
@@ -641,8 +645,25 @@ async def fetch_enhanced_players() -> tuple:
     players = data.get('elements', [])
     teams = {team['id']: team for team in data.get('teams', [])}
 
-    # Enhance with xG/xA and FBRef stats
-    enhanced_players, match_stats = enhance_players_with_understat(players)
+    # Enhance with xG/xA and FBRef stats.
+    #
+    # Run in a worker THREAD, not on the event loop. `enhance_players_with_
+    # understat` is fully synchronous and can drive a Selenium scrape that takes
+    # minutes when a cache expires; calling it directly froze the whole server —
+    # every request (players, chat, analytics) hung until the scrape finished,
+    # which looked to the user like three separate features being broken.
+    # A thread keeps the API responsive while the scrape proceeds.
+    try:
+        enhanced_players, match_stats = await asyncio.wait_for(
+            asyncio.to_thread(enhance_players_with_understat, players),
+            timeout=ENHANCE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # Degrade to plain FPL data rather than hanging the request. FPL's own
+        # fields now include expected_goals/assists, so this is still usable.
+        print(f"⚠️  enhanced stats timed out after {ENHANCE_TIMEOUT_SECONDS}s — "
+              "serving base FPL data (which includes native xG/xA)")
+        enhanced_players = players
 
     return enhanced_players, teams, data
 
@@ -1813,6 +1834,234 @@ async def suggest_chips_strategy(available_chips: List[str], num_gameweeks: int 
 
 
 # ============== MCP TOOL: get_my_team (user team) ==============
+@app.get("/api/analytics/{team_id}")
+async def get_team_analytics(team_id: int, league_id: Optional[int] = None):
+    """
+    Season analytics for one manager: gameweek-by-gameweek history, how each
+    week compares to the manager's own average and to the global average, and
+    where they sit in their mini-leagues.
+
+    Built for the "My Team" analytics view. Everything comes from FPL's own
+    endpoints, so there is no scraping and no staleness beyond FPL's own.
+    """
+    try:
+        ssl_context = get_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            base = "https://fantasy.premierleague.com/api"
+
+            async def fetch(url):
+                async with session.get(url) as r:
+                    return await r.json() if r.status == 200 else None
+
+            entry, history, bootstrap = await asyncio.gather(
+                fetch(f"{base}/entry/{team_id}/"),
+                fetch(f"{base}/entry/{team_id}/history/"),
+                fetch(f"{base}/bootstrap-static/"),
+            )
+
+        if not entry or not history:
+            raise HTTPException(status_code=404, detail=f"Team {team_id} not found")
+
+        current = history.get("current", []) or []
+        chips_used = history.get("chips", []) or []
+
+        # FPL publishes the global average score per gameweek on the event
+        # object, which is the fairest "how did I do this week" benchmark —
+        # a 60 is good in a low-scoring week and poor in a high-scoring one.
+        events = {e["id"]: e for e in (bootstrap or {}).get("events", [])}
+
+        gameweeks = []
+        for row in current:
+            gw = row["event"]
+            ev = events.get(gw, {})
+            avg = ev.get("average_entry_score") or 0
+            highest = ev.get("highest_score") or 0
+            pts = row.get("points", 0)
+            gameweeks.append({
+                "gameweek": gw,
+                "points": pts,
+                "average": avg,
+                "highest": highest,
+                "vs_average": pts - avg,
+                "total_points": row.get("total_points", 0),
+                "overall_rank": row.get("overall_rank"),
+                "gw_rank": row.get("rank"),
+                "bench_points": row.get("points_on_bench", 0),
+                "transfers": row.get("event_transfers", 0),
+                "transfer_cost": row.get("event_transfers_cost", 0),
+                "value": round((row.get("value") or 0) / 10, 1),
+                "bank": round((row.get("bank") or 0) / 10, 1),
+                "chip": next((c["name"] for c in chips_used if c.get("event") == gw), None),
+            })
+
+        played = len(gameweeks)
+        pts_list = [g["points"] for g in gameweeks]
+        best = max(gameweeks, key=lambda g: g["points"]) if gameweeks else None
+        worst = min(gameweeks, key=lambda g: g["points"]) if gameweeks else None
+
+        # Rank movement across the season so far. Negative delta = improving,
+        # since a LOWER overall rank is better.
+        ranks = [g["overall_rank"] for g in gameweeks if g["overall_rank"]]
+        rank_change = (ranks[0] - ranks[-1]) if len(ranks) >= 2 else 0
+
+        summary = {
+            "team_name": entry.get("name"),
+            "manager": f"{entry.get('player_first_name','')} {entry.get('player_last_name','')}".strip(),
+            "total_points": entry.get("summary_overall_points") or 0,
+            "overall_rank": entry.get("summary_overall_rank"),
+            "gameweeks_played": played,
+            "average_score": round(sum(pts_list) / played, 1) if played else 0,
+            "best_gw": {"gameweek": best["gameweek"], "points": best["points"]} if best else None,
+            "worst_gw": {"gameweek": worst["gameweek"], "points": worst["points"]} if worst else None,
+            "total_bench_points": sum(g["bench_points"] for g in gameweeks),
+            "total_transfer_cost": sum(g["transfer_cost"] for g in gameweeks),
+            "beat_average_count": sum(1 for g in gameweeks if g["vs_average"] > 0),
+            "rank_change": rank_change,
+            "squad_value": round((entry.get("last_deadline_value") or 1000) / 10, 1),
+            "bank": round((entry.get("last_deadline_bank") or 0) / 10, 1),
+            "chips_used": [{"name": c["name"], "gameweek": c.get("event")} for c in chips_used],
+        }
+
+        leagues = [
+            {
+                "id": l["id"],
+                "name": l["name"],
+                "rank": l.get("entry_rank"),
+                "last_rank": l.get("entry_last_rank"),
+                # Positive = moved up the table this week.
+                "movement": ((l.get("entry_last_rank") or 0) - (l.get("entry_rank") or 0))
+                            if l.get("entry_last_rank") and l.get("entry_rank") else 0,
+            }
+            for l in (entry.get("leagues", {}) or {}).get("classic", [])
+        ]
+
+        return {
+            "summary": summary,
+            "gameweeks": gameweeks,
+            "leagues": leagues,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/analytics/{team_id}/league/{league_id}")
+async def get_league_comparison(team_id: int, league_id: int):
+    """
+    How this manager compares to the other members of one mini-league.
+
+    Returns the standings plus percentile placement and the gap to the leader,
+    which is the context a bare rank number does not give you.
+    """
+    try:
+        ssl_context = get_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            url = f"https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/"
+            async with session.get(url) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=r.status, detail="League not found")
+                data = await r.json()
+
+        results = (data.get("standings", {}) or {}).get("results", []) or []
+        me = next((e for e in results if e.get("entry") == team_id), None)
+
+        # In a large league the manager is not on page 1, so `me` stays None and
+        # every personal stat comes back empty (observed: rank ~78,000 against a
+        # 50-row page, with FPL reporting has_next=True and no rank_count).
+        # Paging to find them would take ~1,500 requests, so instead read the
+        # manager's own standing from their entry — FPL already publishes their
+        # rank in every league they are in, which is exact and costs one call.
+        my_league_rank = None
+        if me is None:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=get_ssl_context())
+            ) as session:
+                async with session.get(
+                    f"https://fantasy.premierleague.com/api/entry/{team_id}/"
+                ) as r:
+                    entry = await r.json() if r.status == 200 else {}
+            for l in (entry.get("leagues", {}) or {}).get("classic", []):
+                if l.get("id") == league_id:
+                    my_league_rank = l.get("entry_rank")
+                    me = {
+                        "rank": l.get("entry_rank"),
+                        "last_rank": l.get("entry_last_rank"),
+                        "total": entry.get("summary_overall_points"),
+                        "event_total": entry.get("summary_event_points"),
+                        "entry": team_id,
+                    }
+                    break
+
+        totals = [e["total"] for e in results]
+
+        stats = None
+        if results:
+            leader = results[0]
+            stats = {
+                "members_shown": len(results),
+                "leader_total": leader["total"],
+                # NOTE: this is the average of the VISIBLE PAGE (the top ~50),
+                # not of the whole league — FPL pages standings and publishes no
+                # league-wide average. Comparing a mid-table manager against it
+                # is comparing them to the leaders, so the UI labels it "top 50
+                # average" rather than "league average".
+                "top50_average": round(sum(totals) / len(totals), 1),
+                "league_average": round(sum(totals) / len(totals), 1),
+                "top_score_this_gw": max((e.get("event_total") or 0) for e in results),
+                "average_this_gw": round(
+                    sum((e.get("event_total") or 0) for e in results) / len(results), 1
+                ),
+            }
+            if me:
+                total_members = (data.get("league", {}) or {}).get("rank_count")
+                my_rank = me.get("rank")
+                stats.update({
+                    "my_rank": my_rank,
+                    "my_total": me["total"],
+                    "my_gw_points": me.get("event_total"),
+                    "points_behind_leader": leader["total"] - me["total"],
+                    "vs_top50_average": round(me["total"] - stats["top50_average"], 1),
+                    "total_members": total_members,
+                    # Percentile from the manager's TRUE rank when the league
+                    # size is known, rather than from the visible page — the
+                    # page-1 version reported "top 0%" for someone ranked 78,000th.
+                    "percentile": (
+                        round((1 - (my_rank - 1) / total_members) * 100)
+                        if total_members and my_rank else None
+                    ),
+                })
+
+        return {
+            "league": {
+                "id": league_id,
+                "name": (data.get("league", {}) or {}).get("name"),
+            },
+            "stats": stats,
+            "standings": [
+                {
+                    "rank": e.get("rank"),
+                    "last_rank": e.get("last_rank"),
+                    "entry": e.get("entry"),
+                    "entry_name": e.get("entry_name"),
+                    "player_name": e.get("player_name"),
+                    "total": e.get("total"),
+                    "event_total": e.get("event_total"),
+                    "is_me": e.get("entry") == team_id,
+                }
+                for e in results[:50]
+            ],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/team/{team_id}")
 async def get_user_team(team_id: int):
     """
@@ -2306,35 +2555,95 @@ async def get_bot_decision(early: bool = False):
 
 
 @app.get("/api/bot/price-changes")
-async def get_price_changes():
+async def get_price_changes(limit: int = 20):
     """
-    Get players most likely to have price changes.
+    Players closest to a price rise or fall, from **FPL's own official data**.
 
-    First tries LiveFPL.net (most accurate - 99% rise, 98% fall accuracy).
-    Falls back to FPL API transfer data if LiveFPL unavailable.
+    Previously this scraped LiveFPL and, failing that, guessed from raw transfer
+    counts — both of which were estimates of something FPL now publishes
+    directly:
 
-    Returns:
-    - rising: Top 20 players most likely to rise in price
-    - falling: Top 20 players most likely to fall in price
-    - source: 'livefpl.net' or 'fpl_api'
-    - accuracy: Prediction accuracy (if from LiveFPL)
+      price_change_percent      progress toward a change; +100 triggers a rise,
+                                -100 a fall
+      price_change_projections  per-day projections, each with a `likelihood`
+                                from -5 (near-certain fall) to +5 (near-certain
+                                rise)
+      price_change_hourly_rate  current rate of movement
+
+    Using the official numbers removes a scraping dependency, a LiveFPL
+    outage path, and the BOT_TEAM_ID requirement (the old version built a whole
+    BotDecisionMaker just to read prices, so it 503'd when no bot team was set).
+
+    Response keys are unchanged (`rising`/`falling`/`source`), so existing
+    consumers keep working; each player now also carries `progress_percent`,
+    `likelihood` and `confidence`.
     """
-    from bot_decision_maker import BotDecisionMaker
-
     try:
-        bot = BotDecisionMaker(BOT_TEAM_ID)
-        await bot.initialize()
+        data = await make_fpl_request("bootstrap-static/")
+        if "error" in data:
+            raise HTTPException(status_code=502, detail=f"FPL API error: {data['error']}")
 
-        # Try LiveFPL first, fall back to FPL API
-        price_changes = await bot.analyze_price_changes_async()
-        await bot.close()
+        limit = min(max(int(limit or 20), 1), 50)
+        teams = {t["id"]: t.get("short_name", "?") for t in data.get("teams", [])}
+
+        def progress(p) -> float:
+            try:
+                return float(p.get("price_change_percent") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        candidates = [
+            p for p in data.get("elements", [])
+            if p.get("price_change_percent") is not None
+        ]
+        if not candidates:
+            # FPL blanks these fields outside its daily calculation window.
+            return {"rising": [], "falling": [], "source": "fpl_official",
+                    "note": "FPL is not publishing price-change progress right now."}
+
+        # Likelihood is signed (-5 falling .. +5 rising); magnitude is confidence.
+        CONFIDENCE = {5: "near-certain", 4: "very likely", 3: "likely",
+                      2: "possible", 1: "outside chance", 0: "unclear"}
+
+        def shape(p) -> Dict:
+            proj = (p.get("price_change_projections") or [{}])[0]
+            like = proj.get("likelihood")
+            pct = progress(p)
+            t_in = p.get("transfers_in_event", 0) or 0
+            t_out = p.get("transfers_out_event", 0) or 0
+            return {
+                "id": p.get("id"),
+                "name": p.get("web_name"),
+                "team": teams.get(p.get("team"), "?"),
+                "price": round((p.get("now_cost") or 0) / 10, 1),
+                "progress_percent": round(pct, 1),
+                "likelihood": like,
+                "confidence": CONFIDENCE.get(abs(like) if like is not None else 0, "unclear"),
+                "hourly_rate": p.get("price_change_hourly_rate"),
+                "net_transfers": t_in - t_out,
+                "transfers_in": t_in,
+                "transfers_out": t_out,
+                # Kept for compatibility with the previous LiveFPL shape.
+                "risk_level": "high" if abs(pct) >= 75 else "medium" if abs(pct) >= 50 else "low",
+                "already_changed": (p.get("cost_change_event") or 0) != 0,
+            }
+
+        rising = [shape(p) for p in sorted(candidates, key=progress, reverse=True)[:limit]]
+        falling = [shape(p) for p in sorted(candidates, key=progress)[:limit]]
 
         return {
-            'rising': price_changes.get('rising', []),
-            'falling': price_changes.get('falling', []),
-            'source': price_changes.get('source', 'fpl_api'),
-            'accuracy': price_changes.get('accuracy', None)
+            "rising": rising,
+            "falling": falling,
+            "source": "fpl_official",
+            "explanation": (
+                "progress_percent is FPL's own progress toward a price change "
+                "(+100 rises, -100 falls). Timing signal only — never a reason "
+                "to buy a player you would not otherwise want."
+            ),
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

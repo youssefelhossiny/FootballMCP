@@ -215,11 +215,13 @@ function AnalyticsPage() {
           <div className="flex items-center gap-2">
             <span className="text-slate-400 text-sm">Data source:</span>
             <span className={`px-2 py-1 rounded text-xs font-medium ${
-              priceChanges.source === 'livefpl.net'
+              priceChanges.source === 'fpl_official'
                 ? 'bg-green-900/50 text-green-400 border border-green-500/50'
                 : 'bg-slate-700 text-slate-300'
             }`}>
-              {priceChanges.source === 'livefpl.net' ? 'LiveFPL.net' : 'FPL API'}
+              {priceChanges.source === 'fpl_official'
+                ? "FPL official projections"
+                : priceChanges.source === 'livefpl.net' ? 'LiveFPL.net' : 'FPL API'}
             </span>
             {priceChanges.accuracy && (
               <span className="text-slate-500 text-xs">

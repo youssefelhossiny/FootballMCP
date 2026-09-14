@@ -1156,6 +1156,55 @@ Verified after the fix: the run named the team, listed the real 15 (Haaland, Wir
 Thiago, Mitchell, Van Hecke, Shaw…), read the £0.0m bank, and correctly declined to transfer Shaw on poor
 form **because he is on the bench** — squad-specific reasoning the generic run could not have produced.
 Runtime also fell to **265s** (from 792s) as caches warmed.
+### ML retrain + xG A/B — xG adds NOTHING, measured twice (2026-09-14)
+Retrained `points_model_v2.pkl` on the same three seasons (**84,577 player-gameweeks**). Metrics are
+unchanged because the training data is unchanged: hurdle **MAE 2.0330, Spearman 0.3326, haul AUC 0.6443**,
+still beating direct (2.1817), form_l5 (2.4250) and last_gw (2.7334).
+
+**The interesting part is the negative result.** FPL now publishes `expected_goals` / `expected_assists` /
+`expected_goal_involvements` / `expected_goals_conceded` natively, at **100% coverage across all three
+training seasons** — so the obvious v3 was "swap ICT proxies for real xG". `ml_train.py` already carried a
+comment saying xG showed "no measured benefit"; rather than trust it, it was re-tested:
+
+| variant | MAE | Spearman | haul AUC | features |
+|---|---|---|---|---|
+| baseline (shipped) | 2.0330 | 0.3326 | 0.6443 | 32 |
+| + xG family | 2.0324 | 0.3350 | 0.6422 | 48 |
+| + xG + starts | 2.0314 | 0.3361 | 0.6451 | 52 |
+
+A 0.08% MAE gain for 20 extra features. **And the per-fold deltas flip sign** (+0.0051, −0.0041, +0.0030,
+−0.0102), with the mean delta at **1.0% of the baseline's own fold-to-fold spread** (0.0016 vs 0.1520).
+That is noise, not signal. Plausible reason: `bps`, `influence`, `creativity` and `threat` already encode
+chance quality, so xG is largely redundant with features the model has. **Do not re-litigate this without
+new evidence** — it has now been measured twice, independently.
+
+### FPL's own price-change projections are live — `get_price_changes` (18th MCP tool)
+FPL now publishes official price movement, which this project was previously **scraping LiveFPL to guess
+at**: `price_change_percent` (progress to a change: +100% rises, −100% falls), `price_change_hourly_rate`,
+and `price_change_projections` carrying per-day projections with a **likelihood score from −5 (near-certain
+fall) to +5 (near-certain rise)**.
+
+Added as an MCP tool and wired into the bot's early-run prompt and tool allowlist, since the early run's
+whole purpose is price-sensitive timing. Verified live: Schade 87.7%, Haaland 81.9% and Belloumi 78.1%
+closest to rising; Udogie −169.4% and Madueke −109.4% closest to falling. The tool description and output
+both state that **price movement is a timing signal, never a reason to buy** — chasing a rise into a bad
+asset costs more than the £0.1m it saves.
+
+**`/api/bot/price-changes` migrated to the official data too.** It previously scraped LiveFPL and fell
+back to guessing from raw transfer counts — both estimates of what FPL now publishes directly. Three
+things improved beyond accuracy:
+- **No scraping dependency** and no LiveFPL-outage fallback path.
+- **No `BOT_TEAM_ID` requirement.** The old version constructed a whole `BotDecisionMaker` just to read
+  prices, so it returned 503 whenever no bot team was configured — a completely unrelated failure.
+- **Richer output**: each player now carries `progress_percent`, `likelihood` (-5..+5) and a readable
+  `confidence`, alongside the original keys (`id`/`name`/`team`/`price`/`net_transfers`/`risk_level`/
+  `already_changed`) so existing consumers keep working unchanged.
+Verified live: Schade 87.7% and Haaland 81.9% closest to rising; Udogie -169.4% closest to falling. The
+frontend source badge now reads "FPL official projections" rather than mislabelling it "FPL API".
+
+`bot_decision_maker.fetch_livefpl_predictions` still scrapes LiveFPL, but that module is the deprecated
+heuristic brain the agent replaced — left alone rather than widening scope.
+
 ### Known remaining gaps (do not assume these are done)
 - The `value` and `bench` **roles are never assigned** (both show 0) — every budget pick lands in
   `rotation` because the rotation test is checked first. Cosmetic for selection (the LP reads price and
