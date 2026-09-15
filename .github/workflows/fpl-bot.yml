@@ -20,13 +20,19 @@
 
 name: FPL bot run
 
+# SCHEDULE DISABLED. This workflow existed to wake a dozing Render free-tier
+# service so it could run the bot — but the bot now runs locally via launchd +
+# headless Claude Code (see fpl-optimizer/com.clankerfc.fplbot.plist), which
+# uses the Claude Code subscription rather than API credit. With no secrets set
+# it failed every 30 minutes and put a red X on the repo.
+#
+# Kept, not deleted, because the Render-doze reasoning below is a real finding
+# and this is still the fallback if the Mac is off at a deadline. To re-enable:
+# set the FPL_API_URL and FPL_ACCESS_CODE secrets, ensure the Anthropic account
+# has credit, then uncomment the `schedule:` block.
 on:
-  schedule:
-    # Every 30 minutes. Most runs are a cheap "nothing due" no-op; the endpoint
-    # only invokes the agent inside a real run window. Cron is UTC, which
-    # matters twice a year when the UK clocks change — FPL deadlines are read
-    # from FPL's own API, so the windows follow the deadline, not this cron.
-    - cron: "*/30 * * * *"
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       run_type:
