@@ -42,8 +42,17 @@ function UserTeamPage() {
   const [profilePlayerName, setProfilePlayerName] = useState(null)
 
   useEffect(() => {
-    // Fall back to the demo team so a first-time visitor sees a working page
-    // (squad + analytics) instead of an empty form.
+    // Auto-load a team so a first-time visitor sees a working page rather than
+    // an empty form — but NOT when they have just asked to switch teams.
+    //
+    // "Switch team" clears the saved id and reloads; without this flag the
+    // demo fallback below immediately re-loaded a team, so the form appeared
+    // for a split second and then bounced straight back into the squad view.
+    const switching = sessionStorage.getItem('fpl_switching_team')
+    if (switching) {
+      sessionStorage.removeItem('fpl_switching_team')
+      return
+    }
     const saved = localStorage.getItem('fpl_team_id') || DEMO_TEAM_ID
     setTeamId(saved)
     setSavedTeamId(saved)
@@ -506,7 +515,13 @@ function TeamIdInput({ team, teamId, setTeamId, onSubmit, loading, error }) {
           </div>
         </div>
         <button
-          onClick={() => { setTeamId(''); localStorage.removeItem('fpl_team_id'); window.location.reload() }}
+          onClick={() => {
+            localStorage.removeItem('fpl_team_id')
+            sessionStorage.setItem('fpl_switching_team', '1')
+            setTeamId('')
+            setSavedTeamId(null)
+            setTeam(null)
+          }}
           className="text-xs text-muted hover:text-primary transition-colors shrink-0"
         >Switch team</button>
       </div>
@@ -525,7 +540,7 @@ function TeamIdInput({ team, teamId, setTeamId, onSubmit, loading, error }) {
             type="text"
             value={teamId}
             onChange={(e) => setTeamId(e.target.value)}
-            placeholder="Enter your team ID (e.g., 6408264)"
+            placeholder={`Enter your team ID (e.g., ${DEMO_TEAM_ID})`}
             className="w-full px-4 py-2.5 rounded-lg text-sm text-primary placeholder:text-muted focus:outline-none transition-shadow"
             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}
             onFocus={e => e.currentTarget.style.boxShadow = '0 0 0 2px var(--accent-primary-ring)'}
@@ -536,10 +551,10 @@ function TeamIdInput({ team, teamId, setTeamId, onSubmit, loading, error }) {
             · Don't have a team? Try the demo:{' '}
             <button
               type="button"
-              onClick={() => setTeamId('6408264')}
+              onClick={() => setTeamId(DEMO_TEAM_ID)}
               className="text-accent font-medium hover:underline"
             >
-              6408264
+              {DEMO_TEAM_ID}
             </button>
           </p>
         </div>

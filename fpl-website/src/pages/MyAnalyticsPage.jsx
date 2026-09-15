@@ -28,9 +28,21 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
   const [leagueLoading, setLeagueLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  // Follow the parent's team id when embedded. Guarded by `cleared` so an
+  // explicit "change team" inside this section is not instantly undone by the
+  // prop being re-applied on the next render.
+  const [cleared, setCleared] = useState(false)
   useEffect(() => {
+    if (cleared) return
     if (teamIdProp && teamIdProp !== teamId) setTeamId(teamIdProp)
-  }, [teamIdProp])
+  }, [teamIdProp, cleared])
+
+  function changeTeam() {
+    localStorage.removeItem('fpl_team_id')
+    setCleared(true)
+    setTeamId('')
+    setData(null)
+  }
 
   useEffect(() => {
     if (teamId) loadAnalytics(teamId)
@@ -80,6 +92,7 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
     const clean = inputId.trim().replace(/\D/g, '')
     if (!clean) return
     localStorage.setItem('fpl_team_id', clean)
+    setCleared(false)
     setTeamId(clean)
   }
 
@@ -122,7 +135,7 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
       <div className="card p-8 text-center max-w-lg mx-auto mt-12"
         style={{ borderColor: 'var(--accent-danger)' }}>
         <div className="text-sm mb-4" style={{ color: 'var(--accent-danger)' }}>{error}</div>
-        <button onClick={() => { localStorage.removeItem('fpl_team_id'); setTeamId('') }}
+        <button onClick={changeTeam}
           className="px-4 py-2 rounded-md text-sm font-medium"
           style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}>
           Use a different team ID
@@ -147,7 +160,7 @@ export function AnalyticsSection({ teamId: teamIdProp }) {
           </div>
         </div>
         <button
-          onClick={() => { localStorage.removeItem('fpl_team_id'); setTeamId('') }}
+          onClick={changeTeam}
           className="text-xs text-muted hover:text-primary transition-colors">
           change team
         </button>
